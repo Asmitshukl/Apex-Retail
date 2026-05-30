@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+datasource db {
+  provider = "postgresql"
+}
+
+model Event {
+  eventId    String   @id @map("event_id")
+  storeId    String   @map("store_id")
+  cameraId   String   @map("camera_id")
+  visitorId  String   @map("visitor_id")
+  eventType  String   @map("event_type")
+  timestamp  DateTime
+  zoneId     String?  @map("zone_id")
+  dwellMs    Int      @default(0) @map("dwell_ms")
+  isStaff    Boolean  @default(false) @map("is_staff")
+  confidence Float
+  metadata   Json     @default("{}")
+  ingestedAt DateTime @default(now()) @map("ingested_at")
+
+  @@index([storeId, timestamp(sort: Desc)])
+  @@index([visitorId, storeId])
+  @@index([storeId, eventType])
+  @@index([storeId, zoneId])
+  @@map("events")
+}
+
+model PosTransaction {
+  transactionId String   @id @map("transaction_id")
+  storeId       String   @map("store_id")
+  timestamp     DateTime
+  basketValue   Float    @map("basket_value")
+
+  @@index([storeId, timestamp])
+  @@map("pos_transactions")
+}

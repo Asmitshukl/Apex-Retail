@@ -1,0 +1,71 @@
+# ─── Python (pipeline/) ───────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+pipeline/.venv/
+pipeline/venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Model weights (large files — store in GDrive/S3)
+pipeline/weights/
+*.pt
+*.pth
+*.onnx
+
+# Pipeline output (generated, not source)
+pipeline/output/
+pipeline/data/
+*.jsonl
+
+# ─── Node / Next.js (apex_fe/ + api/) ─────────────────
+node_modules/
+.next/
+.turbo/
+out/
+dist/
+
+# ─── Environment & Secrets ────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.production
+*.pem
+*.key
+
+# ─── Docker ───────────────────────────────────────────
+docker-compose.override.yml
+
+# ─── Dataset (never commit CCTV footage) ──────────────
+*.mp4
+*.avi
+*.mov
+*.mkv
+dataset/
+clips/
+pos_transactions.csv
+store_layout.json
+
+# ─── OS & Editor ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── Logs ─────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+
+# ─── Test & Coverage ──────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+coverage/
+.nyc_output/

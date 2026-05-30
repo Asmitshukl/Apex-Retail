@@ -1,7 +1,7 @@
-ultralytics==8.2.0
-supervision==0.21.0
-opencv-python==4.9.0.80
-numpy==1.26.4
-torch==2.2.0
-torchvision==0.17.0
-requests==2.31.0
+ultralytics
+supervision
+opencv-python
+numpy
+torch
+torchvision
+requests

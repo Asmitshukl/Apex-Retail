@@ -69,3 +69,5 @@ htmlcov/
 .pytest_cache/
 coverage/
 .nyc_output/
+
+yolov8n.pt

@@ -16,6 +16,7 @@ from ultralytics import YOLO
 
 import emit
 import zones
+from identity import CrossCameraRegistry
 from tracker import ReIDTracker
 
 
@@ -26,6 +27,7 @@ ENTRY_ZONE_NUMBER = "0"
 EXIT_TIMEOUT_SECONDS = 5
 DWELL_SECONDS = 30
 DEFAULT_CLIP_START = "2026-01-01T00:00:00Z"
+CROSS_CAMERA_REGISTRY = CrossCameraRegistry()
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +45,7 @@ def parse_args() -> argparse.Namespace:
         help='Clip start time as ISO-8601 UTC, e.g. "2026-03-03T14:00:00Z"',
     )
     parser.add_argument("--pos-file", default=None, help="Optional pos_transactions.csv path")
+    parser.add_argument("--sample-fps", type=float, default=1.0, help="Frames per second to sample")
     return parser.parse_args()
 
 
@@ -71,17 +74,31 @@ def make_visitor_id(store_id: str, track_id: int, utc_date_string: str) -> str:
 
 
 def is_staff(frame: np.ndarray, bbox: np.ndarray) -> bool:
-    """Return whether a person crop is likely staff based on clothing color.
+    """Return whether a person crop is likely staff using green/blue HSV coverage."""
+    try:
+        x1, y1, x2, y2 = [int(round(value)) for value in bbox]
+        height, width = frame.shape[:2]
+        x1 = max(0, min(x1, width - 1))
+        x2 = max(0, min(x2, width))
+        y1 = max(0, min(y1, height - 1))
+        y2 = max(0, min(y2, height))
+        if x2 <= x1 or y2 <= y1:
+            return False
 
-    TODO: Replace this placeholder with HSV saturation uniformity detection for
-    staff uniforms once store-specific uniform colors are known.
-    """
-    return False
+        crop = frame[y1:y2, x1:x2]
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        green_mask = cv2.inRange(hsv, np.array([35, 81, 51]), np.array([85, 255, 255]))
+        blue_mask = cv2.inRange(hsv, np.array([100, 81, 51]), np.array([130, 255, 255]))
+        combined_mask = cv2.bitwise_or(green_mask, blue_mask)
+        coverage = float(np.count_nonzero(combined_mask)) / float(crop.shape[0] * crop.shape[1])
+        return coverage > 0.35
+    except Exception:
+        return False
 
 
 def run_yolo_person_detections(model: YOLO, frame: np.ndarray) -> sv.Detections:
     """Run YOLOv8 on a frame and return person-only detections for ByteTrack."""
-    results = model(frame, classes=[PERSON_CLASS_ID], conf=0.0, verbose=False)
+    results = model(frame, classes=[PERSON_CLASS_ID], conf=0.0, device="cpu", verbose=False)
     result = results[0]
 
     if result.boxes is None or len(result.boxes) == 0:
@@ -236,11 +253,14 @@ def process_tracked_person(
     zone_number = zones.classify_zone(centroid_x, centroid_y, frame_w, frame_h, zones_dict)
     zone_name = zone_display_name(zone_number, zones_dict)
     utc_date_string = frame_time.date().isoformat()
-    visitor_id = make_visitor_id(args.store_id, track_id, utc_date_string)
     staff = is_staff(frame, bbox)
 
     state = track_state.get(track_id)
     if state is None:
+        embedding = reid_tracker.extract_embedding(frame, bbox)
+        matched_id = reid_tracker.match(embedding)
+        candidate_visitor_id = make_visitor_id(args.store_id, track_id, utc_date_string)
+        visitor_id = matched_id or CROSS_CAMERA_REGISTRY.find_or_create(embedding, candidate_visitor_id)
         state = {
             "visitor_id": visitor_id,
             "current_zone": zone_number,
@@ -253,40 +273,43 @@ def process_tracked_person(
         }
         track_state[track_id] = state
 
-        if zone_number == ENTRY_ZONE_NUMBER:
-            if reid_tracker.has_exit(visitor_id):
-                state["session_seq"] = 1
-                emit_detection_event(
-                    events,
-                    args.output,
-                    args.store_id,
-                    args.camera_id,
-                    visitor_id,
-                    "REENTRY",
-                    frame_timestamp,
-                    zone_name,
-                    0,
-                    staff,
-                    confidence,
-                    state["session_seq"],
-                )
-                reid_tracker.clear_exit(visitor_id)
-            else:
-                emit_detection_event(
-                    events,
-                    args.output,
-                    args.store_id,
-                    args.camera_id,
-                    visitor_id,
-                    "ENTRY",
-                    frame_timestamp,
-                    None,
-                    0,
-                    staff,
-                    confidence,
-                    state["session_seq"],
-                )
-        elif zone_number is not None:
+        if matched_id is not None:
+            state["session_seq"] = 1
+            emit_detection_event(
+                events,
+                args.output,
+                args.store_id,
+                args.camera_id,
+                visitor_id,
+                "REENTRY",
+                frame_timestamp,
+                zone_name,
+                0,
+                staff,
+                confidence,
+                state["session_seq"],
+            )
+            reid_tracker.clear_exit(matched_id)
+        else:
+            emit_detection_event(
+                events,
+                args.output,
+                args.store_id,
+                args.camera_id,
+                visitor_id,
+                "ENTRY",
+                frame_timestamp,
+                None,
+                0,
+                staff,
+                confidence,
+                state["session_seq"],
+            )
+
+        reid_tracker.register(visitor_id, embedding)
+        CROSS_CAMERA_REGISTRY.update(visitor_id, embedding)
+
+        if zone_number is not None and zone_number != ENTRY_ZONE_NUMBER:
             emit_detection_event(
                 events,
                 args.output,
@@ -301,7 +324,6 @@ def process_tracked_person(
                 confidence,
                 state["session_seq"],
             )
-
             if is_billing_zone(zone_number, zones_dict):
                 queue_depth = len(billing_zone_visitors)
                 if queue_depth > 0:
@@ -323,7 +345,11 @@ def process_tracked_person(
                 billing_zone_visitors[visitor_id] = frame_time
         return
 
+    visitor_id = state["visitor_id"]
     state["last_confidence"] = confidence
+    embedding = reid_tracker.extract_embedding(frame, bbox)
+    reid_tracker.register(visitor_id, embedding)
+    CROSS_CAMERA_REGISTRY.update(visitor_id, embedding)
 
     if state["exited"]:
         state["session_seq"] += 1
@@ -469,24 +495,54 @@ def emit_timed_out_exits(
         if missing_seconds <= EXIT_TIMEOUT_SECONDS:
             continue
 
-        if state["current_zone"] == ENTRY_ZONE_NUMBER:
-            dwell_ms = int((state["last_seen"] - state["zone_enter_time"]).total_seconds() * 1000)
-            emit_detection_event(
-                events,
-                args.output,
-                args.store_id,
-                args.camera_id,
-                state["visitor_id"],
-                "EXIT",
-                frame_timestamp,
-                None,
-                max(dwell_ms, 0),
-                False,
-                float(state.get("last_confidence", 0.0)),
-                state["session_seq"],
-            )
-            reid_tracker.mark_exit(state["visitor_id"], frame_time)
+        dwell_ms = int((state["last_seen"] - state["zone_enter_time"]).total_seconds() * 1000)
+        emit_detection_event(
+            events,
+            args.output,
+            args.store_id,
+            args.camera_id,
+            state["visitor_id"],
+            "EXIT",
+            frame_timestamp,
+            None,
+            max(dwell_ms, 0),
+            False,
+            float(state.get("last_confidence", 0.0)),
+            state["session_seq"],
+        )
+        reid_tracker.mark_exit(state["visitor_id"], frame_time)
 
+        state["exited"] = True
+
+
+def flush_open_exits(
+    track_state: dict[int, dict[str, Any]],
+    reid_tracker: ReIDTracker,
+    events: list[dict[str, Any]],
+    args: argparse.Namespace,
+    frame_time: datetime,
+    frame_timestamp: str,
+) -> None:
+    """Emit EXIT events for all non-exited tracks at end of file."""
+    for state in track_state.values():
+        if state["exited"]:
+            continue
+        dwell_ms = int((frame_time - state["zone_enter_time"]).total_seconds() * 1000)
+        emit_detection_event(
+            events,
+            args.output,
+            args.store_id,
+            args.camera_id,
+            state["visitor_id"],
+            "EXIT",
+            frame_timestamp,
+            None,
+            max(dwell_ms, 0),
+            False,
+            float(state.get("last_confidence", 0.0)),
+            state["session_seq"],
+        )
+        reid_tracker.mark_exit(state["visitor_id"], frame_time)
         state["exited"] = True
 
 
@@ -506,10 +562,11 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
 
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     safe_video_fps = video_fps if video_fps > 0 else 1.0
-    sample_every = max(int(safe_video_fps), 1)
+    sample_fps = args.sample_fps if args.sample_fps > 0 else 1.0
+    sample_every = max(1, int(safe_video_fps / sample_fps))
     clip_start_dt = parse_clip_start(args.clip_start)
 
-    model = YOLO("yolov8n.pt")
+    model = YOLO("yolov8n.pt").to("cpu")
     tracker = create_byte_tracker()
     reid_tracker = ReIDTracker()
     track_state: dict[int, dict[str, Any]] = {}
@@ -517,6 +574,8 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
 
     frame_number = 0
+    last_frame_time = clip_start_dt
+    last_frame_timestamp = clip_start_dt.isoformat() + "Z"
     try:
         while True:
             ok, frame = cap.read()
@@ -532,6 +591,8 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
                 frame_number,
                 safe_video_fps,
             )
+            last_frame_time = frame_time
+            last_frame_timestamp = frame_timestamp
             detections = run_yolo_person_detections(model, frame)
             tracked_detections = tracker.update_with_detections(detections)
             active_track_ids: set[int] = set()
@@ -576,6 +637,15 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
             frame_number += 1
     finally:
         cap.release()
+
+    flush_open_exits(
+        track_state,
+        reid_tracker,
+        events,
+        args,
+        last_frame_time,
+        last_frame_timestamp,
+    )
 
     if args.api_url:
         emit.post_events(events, args.api_url)

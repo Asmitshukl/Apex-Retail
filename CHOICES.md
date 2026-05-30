@@ -34,6 +34,8 @@ A VLM (GPT-4V, Claude Vision, Gemini) was considered for zone classification and
 
 ## Decision 2 — Event Schema and visitor_id Design
 
+**Current decision: use hash as fallback, colour histogram as primary match.**
+
 ### Options Considered
 
 **visitor_id Option A — Hash-based (store_id + track_id + date)**

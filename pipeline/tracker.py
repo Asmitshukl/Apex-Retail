@@ -12,14 +12,15 @@ class ReIDTracker:
     """Track visitor exits for future reentry detection.
 
     This class intentionally does not load an OSNet or torchreid model yet. The
-    detection layer currently uses hash-based visitor IDs as the primary identity.
+    detection layer uses HSV color histogram matching first, with hash-generated
+    visitor IDs as the fallback.
     """
 
     def __init__(self) -> None:
         """Create an in-memory exit log keyed by visitor ID."""
         self.exit_log: dict[str, datetime] = {}
         self.embeddings: dict[str, np.ndarray] = {}
-        self.threshold = 0.75
+        self.threshold = 0.88
 
     def extract_embedding(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
         """Extract a normalized 96-dimensional HSV color histogram embedding."""
@@ -44,12 +45,22 @@ class ReIDTracker:
             return embedding
         return embedding / norm
 
-    def match(self, embedding: np.ndarray) -> str | None:
-        """Match an embedding against exited visitors using cosine similarity."""
+    def match(
+        self,
+        embedding: np.ndarray,
+        reference_time: datetime | None = None,
+        window_seconds: int = 600,
+    ) -> str | None:
+        """Match an embedding against recently exited visitors using cosine similarity."""
+        current_time = reference_time or datetime.utcnow()
         best_visitor_id = None
         best_similarity = self.threshold
 
-        for visitor_id in self.exit_log:
+        for visitor_id, exit_time in self.exit_log.items():
+            exit_gap_seconds = (current_time - exit_time).total_seconds()
+            if exit_gap_seconds < 0 or exit_gap_seconds > window_seconds:
+                continue
+
             stored_embedding = self.embeddings.get(visitor_id)
             if stored_embedding is None:
                 continue
@@ -75,7 +86,7 @@ class ReIDTracker:
     def check_reentry(
         self,
         visitor_id: str,
-        window_seconds: int = 600,
+        window_seconds: int = 3600,
         reference_time: datetime | None = None,
     ) -> bool:
         """Return True if a visitor exited within the recent reentry window."""
@@ -85,7 +96,7 @@ class ReIDTracker:
 
         current_time = reference_time or datetime.utcnow()
         delta_seconds = (current_time - exit_time).total_seconds()
-        return delta_seconds < window_seconds
+        return 30 <= delta_seconds < window_seconds
 
     def clear_exit(self, visitor_id: str) -> None:
         """Remove a visitor from the exit log after a reentry is consumed."""

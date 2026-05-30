@@ -109,3 +109,27 @@ def _validate_event(event: dict[str, Any]) -> None:
     for metadata_field in ("queue_depth", "sku_zone", "session_seq"):
         if metadata_field not in metadata:
             raise ValueError(f"Event metadata missing '{metadata_field}'")
+
+    group_entry = metadata.get("group_entry", False)
+    if not isinstance(group_entry, bool):
+        raise ValueError("Event metadata 'group_entry' must be a bool")
+
+    group_size = metadata.get("group_size", 1)
+    if not isinstance(group_size, int):
+        raise ValueError("Event metadata 'group_size' must be an int")
+
+    occluded = metadata.get("occluded", False)
+    if not isinstance(occluded, bool):
+        raise ValueError("Event metadata 'occluded' must be a bool")
+
+    heartbeat = metadata.get("heartbeat", False)
+    if not isinstance(heartbeat, bool):
+        raise ValueError("Event metadata 'heartbeat' must be a bool")
+
+    empty_store_duration_s = metadata.get("empty_store_duration_s")
+    if empty_store_duration_s is not None and not isinstance(empty_store_duration_s, int):
+        raise ValueError("Event metadata 'empty_store_duration_s' must be an int")
+
+    reentry_count = metadata.get("reentry_count", 0)
+    if not isinstance(reentry_count, int):
+        raise ValueError("Event metadata 'reentry_count' must be an int")

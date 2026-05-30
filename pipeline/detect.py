@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import cv2
@@ -20,9 +21,11 @@ from tracker import ReIDTracker
 
 PERSON_CLASS_ID = 0
 PERSON_CONFIDENCE_THRESHOLD = 0.4
+TRACKING_THRESHOLD = 0.4
 ENTRY_ZONE_NUMBER = "0"
 EXIT_TIMEOUT_SECONDS = 5
 DWELL_SECONDS = 30
+DEFAULT_CLIP_START = "2026-01-01T00:00:00Z"
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,17 +37,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layout", required=True, help="Path to store_layout.json")
     parser.add_argument("--output", required=True, help="Path to output .jsonl file")
     parser.add_argument("--api-url", default=None, help="Optional API base URL")
+    parser.add_argument(
+        "--clip-start",
+        default=DEFAULT_CLIP_START,
+        help='Clip start time as ISO-8601 UTC, e.g. "2026-03-03T14:00:00Z"',
+    )
+    parser.add_argument("--pos-file", default=None, help="Optional pos_transactions.csv path")
     return parser.parse_args()
 
 
-def utc_now() -> datetime:
-    """Return the current UTC datetime without timezone information."""
-    return datetime.utcnow()
+def parse_clip_start(clip_start_iso: str) -> datetime:
+    """Parse a clip-start ISO-8601 timestamp into a UTC datetime."""
+    normalized = clip_start_iso.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
-def timestamp_now_iso() -> str:
-    """Return the current UTC timestamp in ISO-8601 format with a Z suffix."""
-    return utc_now().isoformat() + "Z"
+def timestamp_from_frame(clip_start_dt: datetime, frame_number: int, fps: float) -> tuple[datetime, str]:
+    """Return clip-derived frame time and ISO-8601 UTC timestamp for a frame index."""
+    safe_fps = fps if fps > 0 else 1.0
+    frame_time = clip_start_dt + timedelta(seconds=frame_number / safe_fps)
+    return frame_time, frame_time.isoformat() + "Z"
 
 
 def make_visitor_id(store_id: str, track_id: int, utc_date_string: str) -> str:
@@ -64,7 +81,7 @@ def is_staff(frame: np.ndarray, bbox: np.ndarray) -> bool:
 
 def run_yolo_person_detections(model: YOLO, frame: np.ndarray) -> sv.Detections:
     """Run YOLOv8 on a frame and return person-only detections for ByteTrack."""
-    results = model(frame, classes=[PERSON_CLASS_ID], conf=PERSON_CONFIDENCE_THRESHOLD, verbose=False)
+    results = model(frame, classes=[PERSON_CLASS_ID], conf=0.0, verbose=False)
     result = results[0]
 
     if result.boxes is None or len(result.boxes) == 0:
@@ -74,7 +91,8 @@ def run_yolo_person_detections(model: YOLO, frame: np.ndarray) -> sv.Detections:
     confidence = result.boxes.conf.cpu().numpy()
     class_id = result.boxes.cls.cpu().numpy().astype(int)
 
-    person_mask = (class_id == PERSON_CLASS_ID) & (confidence > PERSON_CONFIDENCE_THRESHOLD)
+    # Low confidence events emitted per schema requirement.
+    person_mask = class_id == PERSON_CLASS_ID
     return sv.Detections(
         xyxy=xyxy[person_mask],
         confidence=confidence[person_mask],
@@ -82,10 +100,22 @@ def run_yolo_person_detections(model: YOLO, frame: np.ndarray) -> sv.Detections:
     )
 
 
-def build_metadata(zone_name: str | None, session_seq: int) -> dict[str, Any]:
+def create_byte_tracker() -> sv.ByteTrack:
+    """Create a ByteTrack instance with the configured tracking threshold."""
+    try:
+        return sv.ByteTrack(track_activation_threshold=TRACKING_THRESHOLD)
+    except TypeError:
+        return sv.ByteTrack(track_thresh=TRACKING_THRESHOLD)
+
+
+def build_metadata(
+    zone_name: str | None,
+    session_seq: int,
+    queue_depth: int | None = None,
+) -> dict[str, Any]:
     """Build the metadata object required by the event schema."""
     return {
-        "queue_depth": None,
+        "queue_depth": queue_depth,
         "sku_zone": zone_name,
         "session_seq": session_seq,
     }
@@ -104,6 +134,7 @@ def emit_detection_event(
     staff: bool,
     confidence: float,
     session_seq: int,
+    queue_depth: int | None = None,
 ) -> None:
     """Construct, store, and append one detection event."""
     event = emit.make_event(
@@ -116,7 +147,7 @@ def emit_detection_event(
         dwell_ms=dwell_ms,
         is_staff=staff,
         confidence=confidence,
-        metadata=build_metadata(zone_name, session_seq),
+        metadata=build_metadata(zone_name, session_seq, queue_depth),
     )
     emit.write_event(event, output_path)
     events.append(event)
@@ -132,6 +163,55 @@ def zone_display_name(zone_number: str | None, zones_dict: dict[str, dict[str, A
     return str(zone_data.get("name"))
 
 
+def is_billing_zone(zone_number: str | None, zones_dict: dict[str, dict[str, Any]]) -> bool:
+    """Return True if a zone's display name identifies it as a billing zone."""
+    zone_name = zone_display_name(zone_number, zones_dict)
+    return zone_name is not None and "billing" in zone_name.lower()
+
+
+def load_pos_transactions(pos_file: str | None) -> list[dict[str, Any]]:
+    """Load POS transactions from a CSV file when one is provided.
+
+    Expected columns are flexible, but store_id and timestamp are required for
+    correlation. Timestamp values must be ISO-8601 strings, with an optional Z.
+    """
+    if not pos_file:
+        return []
+
+    transactions: list[dict[str, Any]] = []
+    with open(pos_file, "r", encoding="utf-8", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        for row in reader:
+            timestamp_value = row.get("timestamp") or row.get("created_at") or row.get("time")
+            store_id = row.get("store_id")
+            if not store_id or not timestamp_value:
+                continue
+            try:
+                timestamp = parse_clip_start(timestamp_value)
+            except ValueError:
+                continue
+            transactions.append({"store_id": store_id, "timestamp": timestamp})
+
+    return transactions
+
+
+def has_recent_pos_transaction(
+    pos_transactions: list[dict[str, Any]],
+    store_id: str,
+    reference_time: datetime,
+    window_seconds: int = 300,
+) -> bool:
+    """Return True if a POS transaction exists for a store in the recent window."""
+    window_start = reference_time - timedelta(seconds=window_seconds)
+    for transaction in pos_transactions:
+        if transaction["store_id"] != store_id:
+            continue
+        timestamp = transaction["timestamp"]
+        if window_start <= timestamp <= reference_time:
+            return True
+    return False
+
+
 def process_tracked_person(
     track_id: int,
     bbox: np.ndarray,
@@ -142,6 +222,8 @@ def process_tracked_person(
     zones_dict: dict[str, dict[str, Any]],
     track_state: dict[int, dict[str, Any]],
     reid_tracker: ReIDTracker,
+    billing_zone_visitors: dict[str, datetime],
+    pos_transactions: list[dict[str, Any]],
     events: list[dict[str, Any]],
     args: argparse.Namespace,
 ) -> None:
@@ -167,11 +249,13 @@ def process_tracked_person(
             "session_seq": 1,
             "exited": False,
             "dwell_last_emitted": frame_time,
+            "last_confidence": confidence,
         }
         track_state[track_id] = state
 
         if zone_number == ENTRY_ZONE_NUMBER:
-            if reid_tracker.check_reentry(visitor_id):
+            if reid_tracker.has_exit(visitor_id):
+                state["session_seq"] = 1
                 emit_detection_event(
                     events,
                     args.output,
@@ -186,14 +270,30 @@ def process_tracked_person(
                     confidence,
                     state["session_seq"],
                 )
-
+                reid_tracker.clear_exit(visitor_id)
+            else:
+                emit_detection_event(
+                    events,
+                    args.output,
+                    args.store_id,
+                    args.camera_id,
+                    visitor_id,
+                    "ENTRY",
+                    frame_timestamp,
+                    None,
+                    0,
+                    staff,
+                    confidence,
+                    state["session_seq"],
+                )
+        elif zone_number is not None:
             emit_detection_event(
                 events,
                 args.output,
                 args.store_id,
                 args.camera_id,
                 visitor_id,
-                "ENTRY",
+                "ZONE_ENTER",
                 frame_timestamp,
                 zone_name,
                 0,
@@ -201,7 +301,29 @@ def process_tracked_person(
                 confidence,
                 state["session_seq"],
             )
+
+            if is_billing_zone(zone_number, zones_dict):
+                queue_depth = len(billing_zone_visitors)
+                if queue_depth > 0:
+                    emit_detection_event(
+                        events,
+                        args.output,
+                        args.store_id,
+                        args.camera_id,
+                        visitor_id,
+                        "BILLING_QUEUE_JOIN",
+                        frame_timestamp,
+                        zone_name,
+                        0,
+                        staff,
+                        confidence,
+                        state["session_seq"],
+                        queue_depth,
+                    )
+                billing_zone_visitors[visitor_id] = frame_time
         return
+
+    state["last_confidence"] = confidence
 
     if state["exited"]:
         state["session_seq"] += 1
@@ -243,6 +365,29 @@ def process_tracked_person(
                 state["session_seq"],
             )
 
+            if is_billing_zone(previous_zone, zones_dict):
+                if args.pos_file and not has_recent_pos_transaction(
+                    pos_transactions,
+                    args.store_id,
+                    frame_time,
+                ):
+                    emit_detection_event(
+                        events,
+                        args.output,
+                        args.store_id,
+                        args.camera_id,
+                        visitor_id,
+                        "BILLING_QUEUE_ABANDON",
+                        frame_timestamp,
+                        previous_zone_name,
+                        dwell_ms,
+                        staff,
+                        confidence,
+                        state["session_seq"],
+                        max(len(billing_zone_visitors) - 1, 0),
+                    )
+                billing_zone_visitors.pop(visitor_id, None)
+
         if zone_number is not None:
             emit_detection_event(
                 events,
@@ -258,6 +403,26 @@ def process_tracked_person(
                 confidence,
                 state["session_seq"],
             )
+
+            if is_billing_zone(zone_number, zones_dict):
+                queue_depth = len(billing_zone_visitors)
+                if queue_depth > 0:
+                    emit_detection_event(
+                        events,
+                        args.output,
+                        args.store_id,
+                        args.camera_id,
+                        visitor_id,
+                        "BILLING_QUEUE_JOIN",
+                        frame_timestamp,
+                        zone_name,
+                        0,
+                        staff,
+                        confidence,
+                        state["session_seq"],
+                        queue_depth,
+                    )
+                billing_zone_visitors[visitor_id] = frame_time
 
         state["current_zone"] = zone_number
         state["zone_enter_time"] = frame_time
@@ -305,7 +470,6 @@ def emit_timed_out_exits(
             continue
 
         if state["current_zone"] == ENTRY_ZONE_NUMBER:
-            zone_name = zone_display_name(state["current_zone"], zones_dict)
             dwell_ms = int((state["last_seen"] - state["zone_enter_time"]).total_seconds() * 1000)
             emit_detection_event(
                 events,
@@ -315,13 +479,13 @@ def emit_timed_out_exits(
                 state["visitor_id"],
                 "EXIT",
                 frame_timestamp,
-                zone_name,
+                None,
                 max(dwell_ms, 0),
                 False,
-                0.0,
+                float(state.get("last_confidence", 0.0)),
                 state["session_seq"],
             )
-            reid_tracker.mark_exit(state["visitor_id"])
+            reid_tracker.mark_exit(state["visitor_id"], frame_time)
 
         state["exited"] = True
 
@@ -329,6 +493,7 @@ def emit_timed_out_exits(
 def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
     """Process one MP4 clip and return all emitted events."""
     zones_dict = zones.load_zones(args.layout)
+    pos_transactions = load_pos_transactions(args.pos_file)
     cap = cv2.VideoCapture(args.clip)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video clip: {args.clip}")
@@ -340,12 +505,15 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
         open(args.output, "w", encoding="utf-8").close()
 
     video_fps = cap.get(cv2.CAP_PROP_FPS)
-    sample_every = max(int(video_fps), 1)
+    safe_video_fps = video_fps if video_fps > 0 else 1.0
+    sample_every = max(int(safe_video_fps), 1)
+    clip_start_dt = parse_clip_start(args.clip_start)
 
     model = YOLO("yolov8n.pt")
-    tracker = sv.ByteTrack()
+    tracker = create_byte_tracker()
     reid_tracker = ReIDTracker()
     track_state: dict[int, dict[str, Any]] = {}
+    billing_zone_visitors: dict[str, datetime] = {}
     events: list[dict[str, Any]] = []
 
     frame_number = 0
@@ -359,8 +527,11 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
                 frame_number += 1
                 continue
 
-            frame_time = utc_now()
-            frame_timestamp = frame_time.isoformat() + "Z"
+            frame_time, frame_timestamp = timestamp_from_frame(
+                clip_start_dt,
+                frame_number,
+                safe_video_fps,
+            )
             detections = run_yolo_person_detections(model, frame)
             tracked_detections = tracker.update_with_detections(detections)
             active_track_ids: set[int] = set()
@@ -385,6 +556,8 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
                         zones_dict,
                         track_state,
                         reid_tracker,
+                        billing_zone_visitors,
+                        pos_transactions,
                         events,
                         args,
                     )

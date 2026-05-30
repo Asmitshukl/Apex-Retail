@@ -10,7 +10,16 @@ from typing import Any
 import requests
 
 
-EVENT_TYPES = {"ENTRY", "EXIT", "ZONE_ENTER", "ZONE_EXIT", "ZONE_DWELL", "REENTRY"}
+EVENT_TYPES = {
+    "ENTRY",
+    "EXIT",
+    "ZONE_ENTER",
+    "ZONE_EXIT",
+    "ZONE_DWELL",
+    "BILLING_QUEUE_JOIN",
+    "BILLING_QUEUE_ABANDON",
+    "REENTRY",
+}
 
 
 def make_event(

@@ -18,15 +18,29 @@ class ReIDTracker:
         # TODO: Load torchreid.utils.FeatureExtractor with OSNet when visual
         # re-identification becomes part of the hot path.
 
-    def mark_exit(self, visitor_id: str) -> None:
+    def mark_exit(self, visitor_id: str, exit_time: datetime | None = None) -> None:
         """Record the UTC time when a visitor exits."""
-        self.exit_log[visitor_id] = datetime.utcnow()
+        self.exit_log[visitor_id] = exit_time or datetime.utcnow()
 
-    def check_reentry(self, visitor_id: str, window_seconds: int = 600) -> bool:
+    def has_exit(self, visitor_id: str) -> bool:
+        """Return True if a visitor has an unconsumed prior exit."""
+        return visitor_id in self.exit_log
+
+    def check_reentry(
+        self,
+        visitor_id: str,
+        window_seconds: int = 600,
+        reference_time: datetime | None = None,
+    ) -> bool:
         """Return True if a visitor exited within the recent reentry window."""
         exit_time = self.exit_log.get(visitor_id)
         if exit_time is None:
             return False
 
-        delta_seconds = (datetime.utcnow() - exit_time).total_seconds()
+        current_time = reference_time or datetime.utcnow()
+        delta_seconds = (current_time - exit_time).total_seconds()
         return delta_seconds < window_seconds
+
+    def clear_exit(self, visitor_id: str) -> None:
+        """Remove a visitor from the exit log after a reentry is consumed."""
+        self.exit_log.pop(visitor_id, None)

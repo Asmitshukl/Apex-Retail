@@ -31,6 +31,8 @@ ADAPTIVE_CONFIDENCE_STEP = 0.05
 ENTRY_EXIT_CROSSING_PERCENT = 5.0
 HEARTBEAT_INTERVAL_SECONDS = 60
 DEFAULT_CLIP_START = "2026-01-01T00:00:00Z"
+API_POST_BATCH_SIZE = 20
+LIVE_API_POST_BATCH_SIZE = 5
 CROSS_CAMERA_REGISTRY = CrossCameraRegistry()
 REENTRY_COUNTS: dict[str, int] = {}
 VISITOR_SESSION_SEQS: dict[str, int] = {}
@@ -59,7 +61,56 @@ def parse_args() -> argparse.Namespace:
         default="floor",
         help="Camera role controlling which business events are emitted",
     )
+    parser.add_argument(
+        "--live-mode",
+        action="store_true",
+        default=False,
+        help="Post smaller API batches and prefix detection logs for live dashboards",
+    )
     return parser.parse_args()
+
+
+def log_line(args: argparse.Namespace, message: str) -> None:
+    """Print a detection log line, marking live-mode output for operators."""
+    prefix = "[LIVE] " if args.live_mode else ""
+    print(f"{prefix}{message}")
+
+
+def api_log_prefix(args: argparse.Namespace) -> str:
+    """Return the prefix used for API posting logs."""
+    return "[LIVE] " if args.live_mode else ""
+
+
+def api_post_batch_size(args: argparse.Namespace) -> int:
+    """Return the API flush size for normal or live processing."""
+    return LIVE_API_POST_BATCH_SIZE if args.live_mode else API_POST_BATCH_SIZE
+
+
+def flush_api_events(
+    events: list[dict[str, Any]],
+    args: argparse.Namespace,
+    posted_count: int,
+    force: bool = False,
+) -> int:
+    """Post newly emitted events once the configured API batch size is reached."""
+    if not args.api_url:
+        return posted_count
+
+    pending_count = len(events) - posted_count
+    batch_size = api_post_batch_size(args)
+    if pending_count < batch_size and not force:
+        return posted_count
+
+    if pending_count <= 0:
+        return posted_count
+
+    emit.post_events(
+        events[posted_count:],
+        args.api_url,
+        batch_size=batch_size,
+        log_prefix=api_log_prefix(args),
+    )
+    return len(events)
 
 
 def parse_clip_start(clip_start_iso: str) -> datetime:
@@ -710,6 +761,7 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
     no_detection_frames = 0
     empty_store_start_time: datetime | None = None
     next_empty_heartbeat_s = HEARTBEAT_INTERVAL_SECONDS
+    posted_event_count = 0
     try:
         while True:
             ok, frame = cap.read()
@@ -745,9 +797,10 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
 
                 no_detection_frames += 1
                 if no_detection_frames >= NO_DETECTION_WARNING_FRAMES:
-                    print(
+                    log_line(
+                        args,
                         f"WARNING: No detections in last 10 frames on {args.camera_id}. "
-                        "Check zone polygons and camera angle."
+                        "Check zone polygons and camera angle.",
                     )
                     if min_confidence > confidence_floor:
                         min_confidence = max(
@@ -801,6 +854,7 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
                 active_track_ids,
             )
             finalize_frame_entry_metadata(events, frame_event_start)
+            posted_event_count = flush_api_events(events, args, posted_event_count)
 
             frame_number += 1
     finally:
@@ -818,8 +872,7 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
     for event in events:
         emit.write_event(event, args.output)
 
-    if args.api_url:
-        emit.post_events(events, args.api_url)
+    posted_event_count = flush_api_events(events, args, posted_event_count, force=True)
 
     return events
 
@@ -828,7 +881,7 @@ def main() -> None:
     """Run the detection layer from command-line arguments."""
     args = parse_args()
     events = process_clip(args)
-    print(f"Wrote {len(events)} events to {args.output}")
+    log_line(args, f"Wrote {len(events)} events to {args.output}")
 
 
 if __name__ == "__main__":

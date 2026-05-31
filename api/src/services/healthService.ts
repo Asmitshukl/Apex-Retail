@@ -11,31 +11,38 @@ export async function getHealthStatus() {
 
   try {
     await prisma.$queryRaw`SELECT 1`;
-    const grouped = await prisma.event.groupBy({
-      by: ["storeId"],
-      _max: { timestamp: true },
-    });
-
-    for (const row of grouped) {
-      const lastEvent = row._max.timestamp;
-      if (!lastEvent) {
-        continue;
-      }
-      const stale = checkedAt.getTime() - lastEvent.getTime() > 10 * 60 * 1000;
-      stores.push({
-        store_id: row.storeId,
-        last_event: lastEvent.toISOString(),
-        feed_status: stale ? "STALE_FEED" : "LIVE",
-      });
-    }
   } catch {
     database = "disconnected";
+  }
+
+  if (database === "connected") {
+    try {
+      const grouped = await prisma.event.groupBy({
+        by: ["storeId"],
+        _max: { timestamp: true },
+      });
+
+      for (const row of grouped) {
+        const lastEvent = row._max.timestamp;
+        if (!lastEvent) {
+          continue;
+        }
+        const stale = checkedAt.getTime() - lastEvent.getTime() > 10 * 60 * 1000;
+        stores.push({
+          store_id: row.storeId,
+          last_event: lastEvent.toISOString(),
+          feed_status: stale ? "STALE_FEED" : "LIVE",
+        });
+      }
+    } catch {
+      database = "disconnected";
+    }
   }
 
   const degraded = database === "disconnected" || stores.some((store) => store.feed_status === "STALE_FEED");
 
   return {
-    statusCode: degraded ? 503 : 200,
+    statusCode: 200,
     body: {
       status: degraded ? "degraded" : "ok",
       database,

@@ -65,22 +65,28 @@ def write_event(event: dict[str, Any], output_path: str) -> None:
         output_file.write(json.dumps(event, separators=(",", ":")) + "\n")
 
 
-def post_events(events: list[dict[str, Any]], api_url: str) -> None:
-    """Post events to an ingest API in batches of 100, continuing after failures."""
+def post_events(
+    events: list[dict[str, Any]],
+    api_url: str,
+    batch_size: int = 100,
+    log_prefix: str = "",
+) -> None:
+    """Post events to an ingest API in batches, continuing after failures."""
     if not api_url:
         return
 
     ingest_url = f"{api_url.rstrip('/')}/events/ingest"
-    for start in range(0, len(events), 100):
-        batch = events[start : start + 100]
+    safe_batch_size = max(1, batch_size)
+    for start in range(0, len(events), safe_batch_size):
+        batch = events[start : start + safe_batch_size]
         try:
             response = requests.post(ingest_url, json={"events": batch}, timeout=10)
             if 200 <= response.status_code < 300:
-                print(f"Batch accepted: {len(batch)} events")
+                print(f"{log_prefix}Batch accepted: {len(batch)} events")
             else:
-                print(f"Batch failed: {response.status_code} {response.reason}")
+                print(f"{log_prefix}Batch failed: {response.status_code} {response.reason}")
         except requests.RequestException as exc:
-            print(f"Batch failed: request error {exc}")
+            print(f"{log_prefix}Batch failed: request error {exc}")
 
 
 def _validate_event(event: dict[str, Any]) -> None:

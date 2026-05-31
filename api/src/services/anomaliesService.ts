@@ -38,7 +38,6 @@ export async function getStoreAnomalies(storeId: string) {
   const now = new Date();
   const detectedAt = now.toISOString();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60 * 1000);
   const startOfToday = new Date(now);
   startOfToday.setHours(0, 0, 0, 0);
 
@@ -92,11 +91,21 @@ export async function getStoreAnomalies(storeId: string) {
     });
   }
 
-  const everZones = await prisma.event.findMany({
-    where: { storeId, eventType: "ZONE_ENTER", zoneId: { not: null } },
-    distinct: ["zoneId"],
-    select: { zoneId: true },
-  });
+  const [everZones, latestStoreEvent] = await Promise.all([
+    prisma.event.findMany({
+      where: { storeId, eventType: "ZONE_ENTER", zoneId: { not: null } },
+      distinct: ["zoneId"],
+      select: { zoneId: true },
+    }),
+    prisma.event.findFirst({
+      where: { storeId },
+      orderBy: { timestamp: "desc" },
+      select: { timestamp: true },
+    }),
+  ]);
+  const deadZoneReferenceTime = latestStoreEvent?.timestamp ?? now;
+  const thirtyMinutesBeforeLatestEvent = new Date(deadZoneReferenceTime.getTime() - 30 * 60 * 1000);
+
   for (const zone of everZones) {
     if (!zone.zoneId) {
       continue;
@@ -106,7 +115,10 @@ export async function getStoreAnomalies(storeId: string) {
         storeId,
         zoneId: zone.zoneId,
         eventType: "ZONE_ENTER",
-        timestamp: { gte: thirtyMinutesAgo },
+        timestamp: {
+          gte: thirtyMinutesBeforeLatestEvent,
+          lte: deadZoneReferenceTime,
+        },
       },
       select: { eventId: true },
     });

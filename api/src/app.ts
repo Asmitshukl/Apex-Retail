@@ -8,6 +8,7 @@ import funnelRouter from "./routes/funnel.js";
 import healthRouter from "./routes/health.js";
 import heatmapRouter from "./routes/heatmap.js";
 import metricsRouter from "./routes/metrics.js";
+import pipelineRouter from "./routes/pipeline.js";
 
 export function createApp() {
   const app = express();
@@ -16,6 +17,7 @@ export function createApp() {
   app.use(httpLogger);
 
   app.use("/events", eventsRouter);
+  app.use("/pipeline", pipelineRouter);
   app.use("/stores", metricsRouter);
   app.use("/stores", funnelRouter);
   app.use("/stores", heatmapRouter);

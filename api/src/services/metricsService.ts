@@ -1,11 +1,26 @@
 import prisma from "../db/client.js";
 import { computeActiveQueueDepth, hasPurchaseMatch, isBillingEvent } from "../lib/analytics.js";
+import { logger } from "../middleware/logger.js";
 
 export async function getStoreMetrics(storeId: string) {
-  const [events, transactions, dwellGroups, joins, abandons] = await Promise.all([
+  logger.info(
+    {
+      sql:
+        'SELECT COUNT(DISTINCT "visitor_id") FROM "events" WHERE "store_id" = $1 AND "event_type" = \'ENTRY\' AND "is_staff" = false',
+      params: [storeId],
+    },
+    "Computing unique visitors across all event timestamps",
+  );
+
+  const [events, entryVisitors, transactions, dwellGroups, joins, abandons] = await Promise.all([
     prisma.event.findMany({
       where: { storeId, isStaff: false },
       orderBy: { timestamp: "asc" },
+    }),
+    prisma.event.findMany({
+      where: { storeId, isStaff: false, eventType: "ENTRY" },
+      distinct: ["visitorId"],
+      select: { visitorId: true },
     }),
     prisma.posTransaction.findMany({
       where: { storeId },
@@ -29,9 +44,7 @@ export async function getStoreMetrics(storeId: string) {
     }),
   ]);
 
-  const entryVisitorIds = new Set(
-    events.filter((event) => event.eventType === "ENTRY").map((event) => event.visitorId),
-  );
+  const entryVisitorIds = new Set(entryVisitors.map((event) => event.visitorId));
   const convertedVisitors = new Set<string>();
   for (const visitorId of entryVisitorIds) {
     const visitorEvents = events.filter((event) => event.visitorId === visitorId);

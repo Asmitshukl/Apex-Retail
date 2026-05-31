@@ -95,8 +95,7 @@ export async function ingestEvents(body: unknown): Promise<IngestResult> {
       continue;
     }
 
-    await prisma.event.create({
-      data: {
+    const data = {
         eventId: event.event_id,
         storeId: event.store_id,
         cameraId: event.camera_id,
@@ -108,7 +107,12 @@ export async function ingestEvents(body: unknown): Promise<IngestResult> {
         isStaff: event.is_staff,
         confidence: event.confidence,
         metadata: event.metadata as Prisma.InputJsonValue,
-      },
+    };
+
+    await prisma.event.upsert({
+      where: { eventId: event.event_id },
+      update: {},
+      create: data,
     });
     accepted += 1;
   }

@@ -20,6 +20,7 @@ apex_fe/out
 
 pipeline/.venv
 pipeline/venv
+pipeline/data
 pipeline/output
 api/uploads
 

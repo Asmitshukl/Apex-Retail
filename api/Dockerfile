@@ -24,9 +24,13 @@ RUN npm ci --include=dev
 
 WORKDIR /app
 COPY pipeline/requirements.txt ./pipeline/requirements.txt
+COPY pipeline/requirements-docker.txt ./pipeline/requirements-docker.txt
 RUN python3 -m venv /app/pipeline/.venv \
     && /app/pipeline/.venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /app/pipeline/.venv/bin/pip install --no-cache-dir -r /app/pipeline/requirements.txt
+    && /app/pipeline/.venv/bin/pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cpu \
+      torch==2.3.1+cpu torchvision==0.18.1+cpu \
+    && /app/pipeline/.venv/bin/pip install --no-cache-dir -r /app/pipeline/requirements-docker.txt
 
 COPY api ./api
 COPY pipeline ./pipeline

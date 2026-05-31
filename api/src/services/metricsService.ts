@@ -1,5 +1,5 @@
 import prisma from "../db/client.js";
-import { computeActiveQueueDepth, hasPurchaseMatch, isBillingEvent } from "../lib/analytics.js";
+import { hasPurchaseMatch, isBillingEvent } from "../lib/analytics.js";
 import { logger } from "../middleware/logger.js";
 
 export async function getStoreMetrics(storeId: string) {
@@ -11,18 +11,11 @@ export async function getStoreMetrics(storeId: string) {
     "Computing unique visitors",
   );
 
-  const [events, uniqueVisitorResult, transactions, dwellGroups, joins, abandons] = await Promise.all([
+  const [events, transactions, dwellGroups] = await Promise.all([
     prisma.event.findMany({
       where: { storeId, isStaff: false },
       orderBy: { timestamp: "asc" },
     }),
-    prisma.$queryRaw<{ count: bigint }[]>`
-      SELECT COUNT(DISTINCT "visitor_id") as count
-      FROM "events"
-      WHERE "store_id" = ${storeId}
-      AND "event_type" = 'ENTRY'
-      AND "is_staff" = false
-    `,
     prisma.posTransaction.findMany({
       where: { storeId },
       orderBy: { timestamp: "asc" },
@@ -37,18 +30,32 @@ export async function getStoreMetrics(storeId: string) {
       },
       _avg: { dwellMs: true },
     }),
-    prisma.event.count({
-      where: { storeId, isStaff: false, eventType: "BILLING_QUEUE_JOIN" },
-    }),
-    prisma.event.count({
-      where: { storeId, isStaff: false, eventType: "BILLING_QUEUE_ABANDON" },
-    }),
   ]);
 
-  const unique_visitors = Number(uniqueVisitorResult[0]?.count ?? 0);
-  const entryVisitorIds = new Set(
-    events.filter((event) => event.eventType === "ENTRY").map((event) => event.visitorId),
-  );
+  const entryVisitorIds = new Set<string>();
+  const exitedVisitorIds = new Set<string>();
+  const joinedQueueIds = new Set<string>();
+  const abandonedQueueIds = new Set<string>();
+
+  for (const event of events) {
+    if (!event.visitorId) {
+      continue;
+    }
+    if (event.eventType === "ENTRY" || event.eventType === "REENTRY") {
+      entryVisitorIds.add(event.visitorId);
+    }
+    if (event.eventType === "EXIT") {
+      exitedVisitorIds.add(event.visitorId);
+    }
+    if (event.eventType === "BILLING_QUEUE_JOIN") {
+      joinedQueueIds.add(event.visitorId);
+    }
+    if (event.eventType === "BILLING_QUEUE_ABANDON") {
+      abandonedQueueIds.add(event.visitorId);
+    }
+  }
+
+  const unique_visitors = [...entryVisitorIds].filter((visitorId) => exitedVisitorIds.has(visitorId)).length;
   const convertedVisitors = new Set<string>();
   for (const visitorId of entryVisitorIds) {
     const visitorEvents = events.filter((event) => event.visitorId === visitorId);
@@ -63,17 +70,17 @@ export async function getStoreMetrics(storeId: string) {
       .map((row) => [row.zoneId as string, Math.round(row._avg.dwellMs ?? 0)]),
   );
 
+  const queueDepth = [...joinedQueueIds].filter(
+    (visitorId) => !abandonedQueueIds.has(visitorId) && !exitedVisitorIds.has(visitorId),
+  ).length;
+
   return {
     store_id: storeId,
     unique_visitors,
     conversion_rate: unique_visitors === 0 ? null : convertedVisitors.size / unique_visitors,
     avg_dwell_by_zone: avgDwellByZone,
-    queue_depth: computeActiveQueueDepth(
-      events.filter((event) =>
-        ["BILLING_QUEUE_JOIN", "BILLING_QUEUE_ABANDON", "EXIT"].includes(event.eventType),
-      ),
-    ),
-    abandonment_rate: joins === 0 ? null : abandons / joins,
+    queue_depth: Math.max(0, queueDepth),
+    abandonment_rate: joinedQueueIds.size === 0 ? null : abandonedQueueIds.size / joinedQueueIds.size,
     computed_at: new Date().toISOString(),
   };
 }

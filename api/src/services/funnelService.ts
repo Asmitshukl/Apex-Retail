@@ -2,7 +2,7 @@ import prisma from "../db/client.js";
 import { dropoff, hasPurchaseMatch, isBillingEvent, reconstructSessions } from "../lib/analytics.js";
 
 export async function getStoreFunnel(storeId: string) {
-  const [events, transactions, entryResult] = await Promise.all([
+  const [events, transactions] = await Promise.all([
     prisma.event.findMany({
       where: { storeId, isStaff: false },
       orderBy: { timestamp: "asc" },
@@ -11,16 +11,21 @@ export async function getStoreFunnel(storeId: string) {
       where: { storeId },
       orderBy: { timestamp: "asc" },
     }),
-    prisma.$queryRaw<{ count: bigint }[]>`
-      SELECT COUNT(DISTINCT "visitor_id") as count
-      FROM "events"
-      WHERE "store_id" = ${storeId}
-      AND "event_type" = 'ENTRY'
-      AND "is_staff" = false
-    `,
   ]);
 
-  const entrySessions = Number(entryResult[0]?.count ?? 0);
+  const entryVisitorIds = new Set(
+    events
+      .filter((event) => event.eventType === "ENTRY" || event.eventType === "REENTRY")
+      .map((event) => event.visitorId)
+      .filter((visitorId): visitorId is string => Boolean(visitorId)),
+  );
+  const exitedVisitorIds = new Set(
+    events
+      .filter((event) => event.eventType === "EXIT")
+      .map((event) => event.visitorId)
+      .filter((visitorId): visitorId is string => Boolean(visitorId)),
+  );
+  const entrySessions = [...entryVisitorIds].filter((visitorId) => exitedVisitorIds.has(visitorId)).length;
   const sessions = reconstructSessions(events).filter((session) =>
     session.events.some((event) => event.eventType === "ENTRY" || event.eventType === "REENTRY"),
   );

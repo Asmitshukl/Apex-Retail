@@ -11,11 +11,20 @@ dist/
 build/
 .eggs/
 
-# Model weights (large files — store in GDrive/S3)
+# Model weights (large files — track official pipeline models with Git LFS)
 pipeline/weights/
 *.pt
 *.pth
 *.onnx
+*.onnx.data
+
+!pipeline/models/
+!pipeline/models/*.onnx
+!pipeline/models/*.onnx.data
+!pipeline/models/*.pt
+!pipeline/models/classes.txt
+!pipeline/models/README.md
+!pipeline/models/.gitkeep
 
 # Pipeline output (generated, not source)
 pipeline/output/
@@ -70,6 +79,4 @@ htmlcov/
 coverage/
 .nyc_output/
 
-yolov8n.pt
-
-pipeline/models/staff_classifier.onnx.data
+!pipeline/models/yolov8n.pt

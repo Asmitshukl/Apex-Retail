@@ -1,0 +1,51 @@
+version: '3.9'
+services:
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: store_intelligence
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@db:5432/store_intelligence
+      PORT: 3001
+      NODE_ENV: production
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./pipeline/data:/app/pipeline/data:ro
+      - ./pipeline/output:/app/pipeline/output
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./apex_fe
+      dockerfile: Dockerfile
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

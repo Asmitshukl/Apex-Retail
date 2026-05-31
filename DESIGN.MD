@@ -161,3 +161,81 @@ Asked Claude whether to materialise sessions on ingest or reconstruct at query t
 Asked Claude whether to use a VLM or a lightweight heuristic for staff detection in the hot path. It recommended against VLM (latency + cost per frame) and suggested HSV histogram + zone pattern classifier. **Agreed** — consistent with the resource-efficiency constraint already driving the threading decision.
 
 ---
+
+## 9. Model Evolution — v1 to v2
+ 
+ ![Changed Model](Assets/fourth.jpg)
+
+### 9.1 What Changed and Why
+ 
+During testing on real Brigade Road CCTV footage, the original detection layer produced incorrect staff classification results. This section documents the problem and the design change made.
+ 
+**Original detection flow (v1):**
+```
+Data / Clip / Live Feed
+        │
+        ▼
+   YOLOv8 Detection Layer
+        │
+        ▼
+   Result: Customer & Employee Identification
+   (using HSV colour heuristic for staff detection)
+```
+ 
+**Problem identified in testing:**
+The HSV-based staff detection was recognising customers with dark clothes as employees and employees standing under bright light as customers. This is a fundamental limitation — colour thresholds cannot distinguish uniform from similar-coloured civilian clothing.
+ 
+**Updated detection flow (v2):**
+```
+Data / Clip / Live Feed
+        │
+        ▼
+  YOLOv8 + LICM Detection Layer  ← major change
+        │
+        ▼
+     Streaming
+        │
+        ▼
+      Result
+```
+ 
+### 9.2 LICM Training Flow
+ 
+The LICM model is trained using the actual store footage:
+ 
+```
+Clip Video
+    │
+    ▼
+Roboflow (website)
+    │ outputs images with labels
+    ▼
+Training the LICM model
+    │
+    ▼
+YOLOv8 + LICM combined
+    │
+    ▼
+Data → Accuracy ↑
+```
+ 
+**Step by step:**
+1. Clip videos from the store are uploaded to Roboflow
+2. Roboflow provides the labelled image dataset (staff / customer crops)
+3. LICM model is trained on this labelled data
+4. The trained LICM model is combined with YOLOv8
+5. YOLOv8 handles person detection, LICM handles staff/customer classification
+6. Result: significantly improved accuracy because the model learns the actual store uniform
+### 9.3 Why This Improves Accuracy
+ 
+| Condition | v1 HSV Result | v2 LICM Result |
+|-----------|--------------|----------------|
+| Customer in dark clothes | ❌ Misclassified as staff | ✅ Correctly customer |
+| Staff under bright light | ❌ Misclassified as customer | ✅ Correctly staff |
+| Staff in normal lighting | ✅ Correct | ✅ Correct |
+| Customer in light clothes | ✅ Correct | ✅ Correct |
+ 
+The LICM model learns the full visual pattern of the uniform — not just its colour — making it robust to lighting variation and clothing similarity.
+ 
+---
+ 

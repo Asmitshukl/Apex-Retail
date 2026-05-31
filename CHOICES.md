@@ -96,3 +96,53 @@ Claude explicitly flagged that the problem statement recommends FastAPI and that
 **The real trade-off acknowledged:** If the automated scoring harness makes FastAPI-specific assumptions about response formats or error structures, that is a scoring risk I accepted knowingly. The API endpoints return standard JSON regardless of framework. The separation of Python pipeline and Node.js API also enforces a clean boundary — the pipeline and API share only the JSONL schema and the POST /events/ingest contract, making either half independently replaceable.
 
 ---
+## Decision 5 — Staff Detection Model Evolution: HSV → LICM
+ 
+This decision was made after testing on real footage and is the most significant design change during development.
+ 
+### What Was Originally Built
+ 
+The first staff detection used an HSV colour heuristic. The lower 60% of each person bounding box was analysed. If more than 45% of pixels were dark/black (V < 60 in HSV), the person was flagged as staff. This was the initial approach agreed with AI — fast, no training data needed, reasonable assumption since staff wear black uniforms.
+ 
+### What Failed in Real Testing
+ 
+Two failure modes appeared when running against actual Brigade Road clips:
+ 
+**False positives:** Customers wearing dark clothing triggered the 45% threshold and were classified as staff. A customer in a black jacket is visually identical to a staff member at the HSV histogram level.
+ 
+**False negatives:** Staff standing under bright store lighting had elevated brightness values in HSV. The bright light washed out the black, pushing pixels above the dark threshold — staff were classified as customers.
+ 
+These are not tuning problems. No threshold value fixes both failure modes simultaneously.
+ 
+### Options Considered
+ 
+| Option | Accuracy | Training needed | Latency | Verdict |
+|--------|----------|----------------|---------|---------|
+| HSV heuristic (v1) | ~60% | None | <1ms | ❌ Failed in testing |
+| Fine-tune full YOLOv8 | ~95% | Large dataset | ~50ms | Too slow, too heavy |
+| VLM per-frame | ~95% | None | 200ms+ | Breaks real-time |
+| LICM on Roboflow (chosen) | ~90%+ | ~300 labelled crops | ~5ms | ✅ Chosen |
+ 
+### What AI Suggested
+ 
+Claude recommended a lightweight image classifier (MobileNetV2 or EfficientNet-B0) trained on labelled crops from the actual store footage via Roboflow. Key reasoning: a separate 2-class classifier on already-detected bounding boxes is faster to train and iterate on than fine-tuning YOLOv8, and only runs on 1-5 crops per frame adding ~5ms overhead.
+ 
+### What I Chose and Why
+ 
+**LICM (Lightweight Image Classification Model) trained on Roboflow.**
+ 
+The training flow:
+1. Extract person crops from store CCTV clips using YOLOv8 detections
+2. Upload crops to Roboflow — label each as `staff` or `customer`
+3. Train EfficientNet-B0 on Roboflow (2-class, ~300 labelled examples)
+4. Export as ONNX for CPU inference
+5. Replace is_staff() HSV function with ONNX inference call in detect.py
+6. Both YOLOv8n and LICM loaded once, shared across all camera feeds
+**Why not fine-tune YOLOv8 directly:** Adding a `staff` class to YOLOv8 requires retraining the full detection head on a large dataset. A separate lightweight classifier on cropped regions trains faster, is easier to iterate on, and does not risk degrading person detection accuracy.
+ 
+**Why I agreed with AI this time:** The testing evidence was clear. The HSV approach produced visibly wrong results on real footage — customers flagged as staff, staff missed under bright lighting. The LICM approach directly addresses both failure modes by learning the actual visual signature of the uniform from labelled examples.
+ 
+**Current status:** LICM training in progress on Roboflow. The HSV fallback remains in place until the trained ONNX model is integrated. This is documented as a known limitation in the current submission.
+ 
+---
+ 

@@ -19,8 +19,8 @@ services:
 
   api:
     build:
-      context: ./api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: api/Dockerfile
     depends_on:
       db:
         condition: service_healthy
@@ -28,11 +28,17 @@ services:
       DATABASE_URL: postgresql://postgres:password@db:5432/store_intelligence
       PORT: 3001
       NODE_ENV: production
+      REPO_ROOT: /app
+      PIPELINE_PYTHON: /app/pipeline/.venv/bin/python3
+      PIPELINE_OUTPUT_DIR: /app/pipeline/output
+      PIPELINE_UPLOADS_DIR: /app/api/uploads/jobs
     ports:
       - "3001:3001"
     volumes:
+      - api_uploads:/app/api/uploads/jobs
+      - pipeline_output:/app/pipeline/output
+      - ./pipeline/models:/app/pipeline/models:ro
       - ./pipeline/data:/app/pipeline/data:ro
-      - ./pipeline/output:/app/pipeline/output
     restart: unless-stopped
 
   frontend:
@@ -49,3 +55,5 @@ services:
 
 volumes:
   postgres_data:
+  api_uploads:
+  pipeline_output:

@@ -46,10 +46,18 @@ const resetStoreRequestSchema = z.object({
 });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "../../..");
-const outputDir = path.join(repoRoot, "pipeline/output");
-const uploadsDir = path.join(repoRoot, "api/uploads/jobs");
-const pipelinePython = path.join(repoRoot, "pipeline/.venv/bin/python3");
+const repoRoot = process.env["REPO_ROOT"]
+  ? path.resolve(process.env["REPO_ROOT"])
+  : path.resolve(__dirname, "../../..");
+const outputDir = process.env["PIPELINE_OUTPUT_DIR"]
+  ? path.resolve(process.env["PIPELINE_OUTPUT_DIR"])
+  : path.join(repoRoot, "pipeline/output");
+const uploadsDir = process.env["PIPELINE_UPLOADS_DIR"]
+  ? path.resolve(process.env["PIPELINE_UPLOADS_DIR"])
+  : path.join(repoRoot, "api/uploads/jobs");
+const pipelinePython = process.env["PIPELINE_PYTHON"]
+  ? path.resolve(process.env["PIPELINE_PYTHON"])
+  : path.join(repoRoot, "pipeline/.venv/bin/python3");
 const licmModelRelativePath = "pipeline/models/staff_classifier.onnx";
 const licmClassesRelativePath = "pipeline/models/classes.txt";
 const licmModelPath = path.join(repoRoot, licmModelRelativePath);

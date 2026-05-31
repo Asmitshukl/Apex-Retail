@@ -16,7 +16,7 @@ export const httpLogger = pinoHttp({
   },
   customProps: (req: Request, res: Response) => ({
     trace_id: req.id,
-    store_id: req.params["id"] ?? req.params["storeId"],
+    store_id: req.params?.["id"] ?? req.params?.["storeId"] ?? null,
     endpoint: req.path,
     method: req.method,
     latency_ms: "responseTime" in res ? res.responseTime : undefined,

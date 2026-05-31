@@ -28,6 +28,12 @@ export const eventSchema = z.object({
       queue_depth: z.number().nullable().optional(),
       sku_zone: z.string().nullable().optional(),
       session_seq: z.number().int().optional(),
+      group_entry: z.boolean().optional(),
+      group_size: z.number().int().optional(),
+      occluded: z.boolean().optional(),
+      heartbeat: z.boolean().optional(),
+      reentry_count: z.number().int().optional(),
+      empty_store_duration_s: z.number().int().optional(),
     })
     .passthrough(),
 });

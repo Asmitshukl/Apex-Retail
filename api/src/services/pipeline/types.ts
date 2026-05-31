@@ -42,6 +42,8 @@ export type UploadedCamera = {
 export type LiveMetrics = {
   unique_visitors: number;
   staff_seen: number;
+  customer_delta: number;
+  staff_delta: number;
   entry_count: number;
   exit_count: number;
   billing_queue: number;
@@ -62,6 +64,8 @@ export type PipelineJob = {
   output_dir: string;
   cameras: UploadedCamera[];
   live_metrics: LiveMetrics;
+  customer_ids: Set<string>;
+  staff_ids: Set<string>;
   summary: {
     total_events: number;
     accepted: number;

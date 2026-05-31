@@ -136,6 +136,8 @@ function emptyLiveMetrics(): LiveMetrics {
   return {
     unique_visitors: 0,
     staff_seen: 0,
+    customer_delta: 0,
+    staff_delta: 0,
     entry_count: 0,
     exit_count: 0,
     billing_queue: 0,
@@ -210,38 +212,41 @@ function eventType(event: unknown): string | null {
 }
 
 function updateLiveMetrics(job: PipelineJob, events: unknown[]): void {
-  const visitors = new Set<string>();
-  const staff = new Set<string>();
+  let customerDelta = 0;
+  let staffDelta = 0;
   let entryCount = 0;
   let exitCount = 0;
   let billingQueue = job.live_metrics.billing_queue;
 
-  for (const camera of job.cameras) {
-    void camera;
-  }
-
   for (const event of events) {
     const visitorId = eventVisitorId(event);
-    if (visitorId && eventIsStaff(event)) {
-      staff.add(visitorId);
-    } else if (visitorId && !isHeartbeatEvent(event)) {
-      visitors.add(visitorId);
+    const staffEvent = eventIsStaff(event);
+    const heartbeatEvent = isHeartbeatEvent(event);
+
+    if (visitorId && staffEvent && !job.staff_ids.has(visitorId)) {
+      job.staff_ids.add(visitorId);
+      staffDelta += 1;
+    } else if (visitorId && !staffEvent && !heartbeatEvent && !job.customer_ids.has(visitorId)) {
+      job.customer_ids.add(visitorId);
+      customerDelta += 1;
     }
 
     const type = eventType(event);
-    if (type === "ENTRY") {
+    if (!staffEvent && type === "ENTRY") {
       entryCount += 1;
-    } else if (type === "EXIT") {
+    } else if (!staffEvent && type === "EXIT") {
       exitCount += 1;
-    } else if (type === "BILLING_QUEUE_JOIN") {
+    } else if (!staffEvent && type === "BILLING_QUEUE_JOIN") {
       billingQueue += 1;
-    } else if (type === "BILLING_QUEUE_ABANDON" || type === "EXIT") {
+    } else if (!staffEvent && (type === "BILLING_QUEUE_ABANDON" || type === "EXIT")) {
       billingQueue = Math.max(0, billingQueue - 1);
     }
   }
 
-  job.live_metrics.unique_visitors += visitors.size;
-  job.live_metrics.staff_seen += staff.size;
+  job.live_metrics.unique_visitors = job.customer_ids.size;
+  job.live_metrics.staff_seen = job.staff_ids.size;
+  job.live_metrics.customer_delta = customerDelta;
+  job.live_metrics.staff_delta = staffDelta;
   job.live_metrics.entry_count += entryCount;
   job.live_metrics.exit_count += exitCount;
   job.live_metrics.billing_queue = billingQueue;
@@ -551,6 +556,14 @@ router.post("/jobs/upload", async (req, res) => {
       return;
     }
 
+    const resetResult = await prisma.event.deleteMany({
+      where: { storeId },
+    });
+    logger.info(
+      { store_id: storeId, deleted_events: resetResult.count, job_id: jobId },
+      "Cleared previous store events before new upload job",
+    );
+
     await fs.mkdir(jobOutputDir, { recursive: true });
     const cameras: UploadedCamera[] = parsedUpload.files.map((file) => {
       const rawCameraId = ["video", "videos", "file", "files"].includes(file.fieldName)
@@ -588,6 +601,8 @@ router.post("/jobs/upload", async (req, res) => {
       output_dir: jobOutputDir,
       cameras,
       live_metrics: emptyLiveMetrics(),
+      customer_ids: new Set<string>(),
+      staff_ids: new Set<string>(),
       summary: null,
       error: null,
       child: null,

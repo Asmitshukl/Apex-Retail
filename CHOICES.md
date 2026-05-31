@@ -96,7 +96,7 @@ Claude explicitly flagged that the problem statement recommends FastAPI and that
 **The real trade-off acknowledged:** If the automated scoring harness makes FastAPI-specific assumptions about response formats or error structures, that is a scoring risk I accepted knowingly. The API endpoints return standard JSON regardless of framework. The separation of Python pipeline and Node.js API also enforces a clean boundary — the pipeline and API share only the JSONL schema and the POST /events/ingest contract, making either half independently replaceable.
 
 ---
-## Decision 5 — Staff Detection Model Evolution: HSV → LICM
+## Decision 4 — Staff Detection Model Evolution: HSV → LICM
  
 This decision was made after testing on real footage and is the most significant design change during development.
  

@@ -1,4 +1,4 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 
 export type CameraRole = "entry" | "floor" | "billing";
 
@@ -74,5 +74,6 @@ export type PipelineJob = {
     duration_ms: number;
   } | null;
   error: string | null;
-  child: ChildProcessWithoutNullStreams | null;
+  child: ChildProcess | null;
+  children: ChildProcess[];
 };

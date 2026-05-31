@@ -60,6 +60,28 @@ let lastRunCompletedAt: string | null = null;
 const jobs = new Map<string, PipelineJob>();
 const jobStreams = new Map<string, Set<Response>>();
 
+function registerJobChild(job: PipelineJob, child: ReturnType<typeof spawn>): void {
+  job.children.push(child);
+  job.child = child;
+}
+
+function unregisterJobChild(job: PipelineJob, child: ReturnType<typeof spawn>): void {
+  job.children = job.children.filter((current) => current !== child);
+  if (job.child === child) {
+    job.child = job.children[job.children.length - 1] ?? null;
+  }
+}
+
+function killJobChildren(job: PipelineJob): void {
+  for (const child of job.children) {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Ignore shutdown failures for individual workers.
+    }
+  }
+}
+
 function logPipeline(cameraId: string, message: string): void {
   process.stdout.write(`[PIPELINE][${cameraId}] ${message}\n`);
 }
@@ -393,50 +415,53 @@ async function runUploadedCamera(job: PipelineJob, camera: UploadedCamera): Prom
     cwd: repoRoot,
     env: process.env,
   });
-  job.child = child;
+  registerJobChild(job, child);
+  try {
+    let stderrOutput = "";
+    let exitCode: number | null | undefined;
+    streamPipelineOutput(camera.camera_id, child.stdout);
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrOutput += chunk.toString();
+    });
+    streamPipelineOutput(camera.camera_id, child.stderr);
+    child.on("close", (code) => {
+      exitCode = code;
+    });
 
-  let stderrOutput = "";
-  let exitCode: number | null | undefined;
-  streamPipelineOutput(camera.camera_id, child.stdout);
-  child.stderr.on("data", (chunk: Buffer) => {
-    stderrOutput += chunk.toString();
-  });
-  streamPipelineOutput(camera.camera_id, child.stderr);
-  child.on("close", (code) => {
-    exitCode = code;
-  });
+    let processedEvents = 0;
+    while (exitCode === undefined) {
+      const events = await readJsonlEvents(camera.output_path);
+      const newEvents = events.slice(processedEvents).filter((event) => !isHeartbeatEvent(event));
+      processedEvents = events.length;
+      camera.events_written = events.length;
+      await ingestNewEventsForJob(job, camera, newEvents);
+      await sleep(1000);
+    }
 
-  let processedEvents = 0;
-  while (exitCode === undefined) {
     const events = await readJsonlEvents(camera.output_path);
     const newEvents = events.slice(processedEvents).filter((event) => !isHeartbeatEvent(event));
     processedEvents = events.length;
     camera.events_written = events.length;
     await ingestNewEventsForJob(job, camera, newEvents);
-    await sleep(1000);
+
+    if (exitCode !== 0) {
+      throw new Error(stderrOutput || `Pipeline failed with exit code ${exitCode ?? "unknown"}`);
+    }
+
+    camera.status = "complete";
+    camera.completed_at = new Date().toISOString();
+    broadcastJob(job, "camera_complete", {
+      job_id: job.job_id,
+      camera_id: camera.camera_id,
+      events_written: camera.events_written,
+      accepted: camera.accepted,
+      duplicates: camera.duplicates,
+      rejected: camera.rejected,
+      duration_ms: Math.round(performance.now() - startedAt),
+    });
+  } finally {
+    unregisterJobChild(job, child);
   }
-
-  const events = await readJsonlEvents(camera.output_path);
-  const newEvents = events.slice(processedEvents).filter((event) => !isHeartbeatEvent(event));
-  processedEvents = events.length;
-  camera.events_written = events.length;
-  await ingestNewEventsForJob(job, camera, newEvents);
-
-  if (exitCode !== 0) {
-    throw new Error(stderrOutput || `Pipeline failed with exit code ${exitCode ?? "unknown"}`);
-  }
-
-  camera.status = "complete";
-  camera.completed_at = new Date().toISOString();
-  broadcastJob(job, "camera_complete", {
-    job_id: job.job_id,
-    camera_id: camera.camera_id,
-    events_written: camera.events_written,
-    accepted: camera.accepted,
-    duplicates: camera.duplicates,
-    rejected: camera.rejected,
-    duration_ms: Math.round(performance.now() - startedAt),
-  });
 }
 
 async function runUploadedJob(job: PipelineJob): Promise<void> {
@@ -446,13 +471,14 @@ async function runUploadedJob(job: PipelineJob): Promise<void> {
   broadcastJob(job, "job_started", publicJob(job));
 
   try {
-    for (const camera of job.cameras) {
+    logPipeline(job.job_id, `Starting ${job.cameras.length} uploaded camera workers in parallel`);
+    await Promise.all(job.cameras.map(async (camera) => {
       if ((job.status as JobStatus) === "cancelled") {
         camera.status = "cancelled";
-        continue;
+        return;
       }
       await runUploadedCamera(job, camera);
-    }
+    }));
 
     if ((job.status as JobStatus) !== "cancelled") {
       job.status = "complete";
@@ -468,15 +494,17 @@ async function runUploadedJob(job: PipelineJob): Promise<void> {
     };
     broadcastJob(job, "job_complete", publicJob(job));
   } catch (err) {
+    killJobChildren(job);
     job.status = "failed";
     job.error = err instanceof Error ? err.message : "Pipeline job failed";
     job.completed_at = new Date().toISOString();
     job.child = null;
-    const runningCamera = job.cameras.find((camera) => camera.status === "running");
-    if (runningCamera) {
-      runningCamera.status = "failed";
-      runningCamera.error = job.error;
-      runningCamera.completed_at = job.completed_at;
+    for (const camera of job.cameras) {
+      if (camera.status !== "complete") {
+        camera.status = "failed";
+        camera.error = job.error;
+        camera.completed_at = job.completed_at;
+      }
     }
     logger.error(err, "Uploaded pipeline job failed");
     broadcastJob(job, "job_failed", publicJob(job));
@@ -606,6 +634,7 @@ router.post("/jobs/upload", async (req, res) => {
       summary: null,
       error: null,
       child: null,
+      children: [],
     };
 
     jobs.set(jobId, job);
@@ -697,9 +726,8 @@ router.post("/jobs/:jobId/cancel", (req, res) => {
 
   job.status = "cancelled";
   job.completed_at = new Date().toISOString();
-  if (job.child) {
-    job.child.kill("SIGTERM");
-  }
+  killJobChildren(job);
+  job.child = null;
   for (const camera of job.cameras) {
     if (camera.status === "running" || camera.status === "pending") {
       camera.status = "cancelled";
@@ -762,9 +790,9 @@ router.post("/run-all", async (req, res) => {
   const perCamera: CameraRunSummary[] = [];
   try {
     pipelineRunning = true;
-    for (const camera of brigadeCameraRuns(parsed.data.store_id, parsed.data.clip_start)) {
-      perCamera.push(await runPipeline(camera));
-    }
+    const cameraRuns = brigadeCameraRuns(parsed.data.store_id, parsed.data.clip_start);
+    logPipeline("RUN_ALL", `Starting ${cameraRuns.length} camera workers in parallel`);
+    perCamera.push(...await Promise.all(cameraRuns.map((camera) => runPipeline(camera))));
     lastRunCompletedAt = new Date().toISOString();
     res.json({
       status: "complete",

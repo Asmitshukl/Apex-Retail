@@ -107,8 +107,8 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
 
   const pendingCustomerDelta = useRef(0);
   const pendingStaffDelta = useRef(0);
-  const displayedCustomerActivity = useRef(0);
-  const displayedStaffActivity = useRef(0);
+  const metricsRef = useRef<LiveMetrics>(emptyMetrics);
+  const processingActiveRef = useRef(false);
 
   const pushLog = useCallback((type: string, message: string) => {
     setLogs((current) => [nextLog(type, message), ...current].slice(0, 24));
@@ -116,6 +116,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
 
   const applyMetrics = useCallback((next: Partial<LiveMetrics> | null | undefined) => {
     const normalised = normaliseMetrics(next);
+    metricsRef.current = normalised;
     setMetrics(normalised);
     if (normalised.customer_delta > 0) {
       pendingCustomerDelta.current += normalised.customer_delta;
@@ -123,17 +124,33 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
     if (normalised.staff_delta > 0) {
       pendingStaffDelta.current += normalised.staff_delta;
     }
+    if (processingActiveRef.current) {
+      const label = timeLabel();
+      setCustomerPoints((current) => [...current.slice(-59), { label, value: normalised.unique_visitors }]);
+      setEmployeePoints((current) => [...current.slice(-59), { label, value: normalised.staff_seen }]);
+    }
+    setLatestCustomerDelta(normalised.customer_delta);
+    setLatestStaffDelta(normalised.staff_delta);
   }, []);
 
   const applyMetricsWithoutDelta = useCallback((next: Partial<LiveMetrics> | null | undefined) => {
-    setMetrics(normaliseMetrics(next));
-  }, [activeJobId, job?.status]);
+    const normalised = normaliseMetrics(next);
+    metricsRef.current = normalised;
+    setMetrics(normalised);
+    if (processingActiveRef.current) {
+      const label = timeLabel();
+      setCustomerPoints((current) => [...current.slice(-59), { label, value: normalised.unique_visitors }]);
+      setEmployeePoints((current) => [...current.slice(-59), { label, value: normalised.staff_seen }]);
+    }
+    setLatestCustomerDelta(normalised.customer_delta);
+    setLatestStaffDelta(normalised.staff_delta);
+  }, []);
 
   const resetLiveState = useCallback((jobId: string) => {
     pendingCustomerDelta.current = 0;
     pendingStaffDelta.current = 0;
-    displayedCustomerActivity.current = 0;
-    displayedStaffActivity.current = 0;
+    metricsRef.current = emptyMetrics;
+    processingActiveRef.current = true;
     setJob(null);
     setMetrics(emptyMetrics);
     setLogs([
@@ -152,8 +169,10 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
     }
     setActiveJobIdState(cleanJobId);
     if (cleanJobId) {
+      processingActiveRef.current = true;
       setStreamStatus("Connecting");
     } else {
+      processingActiveRef.current = false;
       setStreamStatus("Idle");
     }
   }, [activeJobId, resetLiveState]);
@@ -163,7 +182,9 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
     if (snapshot) {
       setActiveJobIdState(snapshot.activeJobId ?? "");
       setJob(snapshot.job ?? null);
-      setMetrics(normaliseMetrics(snapshot.metrics));
+      metricsRef.current = normaliseMetrics(snapshot.metrics);
+      processingActiveRef.current = snapshot.job?.status === "running";
+      setMetrics(metricsRef.current);
       setLogs(snapshot.logs?.length ? snapshot.logs.slice(0, 24) : initialSnapshot.logs);
       setCustomerPoints(snapshot.customerPoints?.length ? snapshot.customerPoints.slice(-60) : initialSnapshot.customerPoints);
       setEmployeePoints(snapshot.employeePoints?.length ? snapshot.employeePoints.slice(-60) : initialSnapshot.employeePoints);
@@ -193,30 +214,6 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
   }, [activeJobId, customerPoints, employeePoints, job, latestCustomerDelta, latestStaffDelta, logs, metrics, restored, streamStatus]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      if (!activeJobId || job?.status !== "running") {
-        return;
-      }
-
-      const customerTarget = pendingCustomerDelta.current;
-      const staffTarget = pendingStaffDelta.current;
-      pendingCustomerDelta.current = 0;
-      pendingStaffDelta.current = 0;
-
-      displayedCustomerActivity.current = Math.max(0, (displayedCustomerActivity.current * 0.58) + customerTarget);
-      displayedStaffActivity.current = Math.max(0, (displayedStaffActivity.current * 0.58) + staffTarget);
-
-      const label = timeLabel();
-      setLatestCustomerDelta(customerTarget);
-      setLatestStaffDelta(staffTarget);
-      setCustomerPoints((current) => [...current.slice(-59), { label, value: Number(displayedCustomerActivity.current.toFixed(2)) }]);
-      setEmployeePoints((current) => [...current.slice(-59), { label, value: Number(displayedStaffActivity.current.toFixed(2)) }]);
-    }, 1000);
-
-    return () => window.clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
     if (!restored || !activeJobId) {
       return;
     }
@@ -229,6 +226,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
 
     source.addEventListener("snapshot", (event) => {
       const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      processingActiveRef.current = nextJob.status === "running";
       setJob(nextJob);
       applyMetricsWithoutDelta(nextJob.live_metrics);
       pushLog("snapshot", `Loaded job ${nextJob.job_id} with ${nextJob.cameras.length} cameras.`);
@@ -236,6 +234,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
 
     source.addEventListener("job_started", (event) => {
       const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      processingActiveRef.current = true;
       setJob(nextJob);
       pushLog("job", `Processing started for ${nextJob.cameras.length} cameras.`);
     });
@@ -248,6 +247,8 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
         rejected: number;
         live_metrics?: LiveMetrics;
       };
+      processingActiveRef.current = true;
+      setJob((current) => current && current.status !== "running" ? { ...current, status: "running" } : current);
       applyMetrics(payload.live_metrics);
       pushLog(
         "batch",
@@ -261,6 +262,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
 
     source.addEventListener("camera_started", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as { camera_id: string; camera_role: string };
+      processingActiveRef.current = true;
       pushLog("camera", `${payload.camera_id} started as ${payload.camera_role}.`);
     });
 
@@ -271,6 +273,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
 
     source.addEventListener("job_complete", (event) => {
       const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      processingActiveRef.current = false;
       setJob(nextJob);
       applyMetricsWithoutDelta(nextJob.live_metrics);
       setStreamStatus("Complete");
@@ -279,6 +282,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
 
     source.addEventListener("job_failed", (event) => {
       const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      processingActiveRef.current = false;
       setJob(nextJob);
       setStreamStatus("Failed");
       pushLog("failed", nextJob.error ?? "Job failed.");
@@ -286,6 +290,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
 
     source.addEventListener("job_cancelled", (event) => {
       const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      processingActiveRef.current = false;
       setJob(nextJob);
       setStreamStatus("Cancelled");
       pushLog("cancelled", "Job was cancelled.");

@@ -31,6 +31,10 @@ PERSON_CONFIDENCE_THRESHOLD = 0.4
 TRACKING_THRESHOLD = 0.4
 ENTRY_ZONE_NUMBER = "0"
 EXIT_TIMEOUT_SECONDS = 5
+ENTRY_COOLDOWN_SECONDS = 60
+ENTRY_CENTROID_THRESHOLD_PERCENT = 50.0
+MIRRORED_ENTRY_CENTROID_THRESHOLD_PERCENT = 70.0
+MIN_USABLE_CONFIDENCE = 0.05
 DWELL_SECONDS = 30
 NO_DETECTION_WARNING_FRAMES = 10
 ADAPTIVE_CONFIDENCE_STEP = 0.05
@@ -42,6 +46,8 @@ LIVE_API_POST_BATCH_SIZE = 5
 CROSS_CAMERA_REGISTRY = CrossCameraRegistry()
 REENTRY_COUNTS: dict[str, int] = {}
 VISITOR_SESSION_SEQS: dict[str, int] = {}
+entry_cooldown: dict[str, datetime] = {}
+visitor_exit_emitted: set[str] = set()
 _licm_session = None
 _licm_class_names: list = ["customer", "staff"]
 
@@ -442,6 +448,13 @@ def emit_entry_exit_event(
 ) -> None:
     """Emit an entry-camera ENTRY/EXIT style event for one tracked visitor."""
     visitor_id = str(state["visitor_id"])
+    if event_type == "EXIT" and (
+        state.get("exit_emitted")
+        or visitor_id in visitor_exit_emitted
+    ):
+        return
+    if event_type == "EXIT" and (confidence is None or float(confidence) < MIN_USABLE_CONFIDENCE):
+        confidence = usable_exit_confidence(state)
     emit_detection_event(
         events,
         args.output,
@@ -461,11 +474,63 @@ def emit_entry_exit_event(
         state["exited"] = True
         state["entry_emitted"] = False
         state["exit_emitted"] = True
+        visitor_exit_emitted.add(visitor_id)
         if reid_tracker is not None:
             reid_tracker.mark_exit(visitor_id, state["last_seen"])
         VISITOR_SESSION_SEQS[visitor_id] = int(state["session_seq"])
     else:
+        state["exited"] = False
         state["entry_emitted"] = True
+        state["exit_emitted"] = False
+        visitor_exit_emitted.discard(visitor_id)
+
+
+def usable_exit_confidence(state: dict[str, Any]) -> float:
+    """Return the last real detection confidence, falling back to unknown confidence."""
+    confidence = state.get("last_confidence")
+    if confidence is None:
+        return 0.5
+    confidence = float(confidence)
+    return confidence if confidence >= MIN_USABLE_CONFIDENCE else 0.5
+
+
+def visitor_has_open_state(track_state: dict[int, dict[str, Any]], visitor_id: str) -> bool:
+    """Return True when this visitor is already tracked as inside the store."""
+    return any(
+        state.get("visitor_id") == visitor_id
+        and not bool(state.get("exited"))
+        and bool(state.get("entry_emitted"))
+        for state in track_state.values()
+    )
+
+
+def can_emit_entry_for_visitor(
+    visitor_id: str,
+    frame_time: datetime,
+    track_state: dict[int, dict[str, Any]],
+) -> bool:
+    """Apply duplicate-entry protection for re-acquired tracks."""
+    if visitor_has_open_state(track_state, visitor_id):
+        return False
+
+    last_entry_time = entry_cooldown.get(visitor_id)
+    if last_entry_time is None:
+        return True
+    return (frame_time - last_entry_time).total_seconds() > ENTRY_COOLDOWN_SECONDS
+
+
+def record_entry(visitor_id: str, frame_time: datetime) -> None:
+    """Remember the last time a visitor was allowed to enter."""
+    entry_cooldown[visitor_id] = frame_time
+    visitor_exit_emitted.discard(visitor_id)
+
+
+def is_near_entry_edge(x_percent: float) -> bool:
+    """Return True when a first-seen entry-camera track starts near an entrance edge."""
+    return (
+        x_percent < ENTRY_CENTROID_THRESHOLD_PERCENT
+        or x_percent > MIRRORED_ENTRY_CENTROID_THRESHOLD_PERCENT
+    )
 
 
 def emit_empty_store_heartbeat(
@@ -511,6 +576,9 @@ def process_tracked_person(
     pos_transactions: list[dict[str, Any]],
     events: list[dict[str, Any]],
     args: argparse.Namespace,
+    pre_existing_track_ids: set[int],
+    pre_existing_visitor_ids: set[str],
+    clip_start_dt: datetime,
 ) -> None:
     """Update one tracked person's state and emit movement events when needed."""
     x1, y1, x2, y2 = bbox
@@ -525,6 +593,19 @@ def process_tracked_person(
     detected_staff = is_staff(frame, bbox)
 
     state = track_state.get(track_id)
+    first_seen_near_entrance = is_near_entry_edge(x_percent)
+    first_seen_at_clip_start = (frame_time - clip_start_dt).total_seconds() <= 2
+    already_inside_at_clip_start = (
+        can_emit_entry_exit(args)
+        and first_seen_at_clip_start
+        and zone_number != ENTRY_ZONE_NUMBER
+    )
+    entering_at_clip_start = (
+        can_emit_entry_exit(args)
+        and first_seen_at_clip_start
+        and zone_number == ENTRY_ZONE_NUMBER
+    )
+
     if state is None:
         embedding = reid_tracker.extract_embedding(frame, bbox)
         matched_id = reid_tracker.match(embedding, frame_time)
@@ -554,16 +635,35 @@ def process_tracked_person(
             "session_seq": session_seq,
             "exited": False,
             "dwell_last_emitted": frame_time,
-            "last_confidence": confidence,
+            "last_confidence": confidence if confidence >= MIN_USABLE_CONFIDENCE else 0.5,
             "is_staff": detected_staff,
             "centroid_history": [(x_percent, frame_number)],
             "entry_emitted": False,
             "exit_emitted": False,
         }
         track_state[track_id] = state
+        if can_emit_entry_exit(args) and (
+            already_inside_at_clip_start
+            or (not entering_at_clip_start and not first_seen_near_entrance)
+        ):
+            pre_existing_track_ids.add(track_id)
+            pre_existing_visitor_ids.add(visitor_id)
         staff = state["is_staff"]
 
-        if matched_reentry and can_emit_entry_exit(args):
+        should_emit_entry = (
+            can_emit_entry_exit(args)
+            and (first_seen_near_entrance or entering_at_clip_start)
+            and track_id not in pre_existing_track_ids
+            and visitor_id not in pre_existing_visitor_ids
+            and can_emit_entry_for_visitor(visitor_id, frame_time, track_state)
+        )
+
+        if (matched_reentry or visitor_id in entry_cooldown) and should_emit_entry:
+            if not matched_reentry:
+                state["session_seq"] += 1
+                VISITOR_SESSION_SEQS[visitor_id] = state["session_seq"]
+                REENTRY_COUNTS[visitor_id] = REENTRY_COUNTS.get(visitor_id, 0) + 1
+            record_entry(visitor_id, frame_time)
             emit_entry_exit_event(
                 events,
                 args,
@@ -572,20 +672,12 @@ def process_tracked_person(
                 frame_timestamp,
                 0,
                 confidence,
-                metadata_updates={"reentry_count": REENTRY_COUNTS[visitor_id]},
+                metadata_updates={"reentry_count": REENTRY_COUNTS.get(visitor_id, 1)},
             )
-            reid_tracker.clear_exit(matched_id)
-        elif can_emit_entry_exit(args):
-            emit_entry_exit_event(
-                events,
-                args,
-                state,
-                "ENTRY",
-                frame_timestamp,
-                0,
-                confidence,
-            )
-        elif can_emit_entry_exit(args) and zone_number == ENTRY_ZONE_NUMBER:
+            if matched_id is not None:
+                reid_tracker.clear_exit(matched_id)
+        elif should_emit_entry:
+            record_entry(visitor_id, frame_time)
             emit_entry_exit_event(
                 events,
                 args,
@@ -640,7 +732,8 @@ def process_tracked_person(
 
     visitor_id = state["visitor_id"]
     staff = bool(state["is_staff"])
-    state["last_confidence"] = confidence
+    if confidence >= MIN_USABLE_CONFIDENCE:
+        state["last_confidence"] = confidence
     state["centroid_history"].append((x_percent, frame_number))
     embedding = reid_tracker.extract_embedding(frame, bbox)
     reid_tracker.register(visitor_id, embedding)
@@ -649,29 +742,45 @@ def process_tracked_person(
     if can_emit_entry_exit(args) and zone_number == ENTRY_ZONE_NUMBER:
         direction = entry_direction(state["centroid_history"])
         if direction == "ENTRY" and (not state["entry_emitted"] or state["exited"]):
-            event_type = "ENTRY"
-            metadata_updates = None
-            if state["exited"]:
-                state["session_seq"] += 1
-                VISITOR_SESSION_SEQS[visitor_id] = state["session_seq"]
-                REENTRY_COUNTS[visitor_id] = REENTRY_COUNTS.get(visitor_id, 0) + 1
-                state["exited"] = False
-                state["exit_emitted"] = False
-                event_type = "REENTRY"
-                metadata_updates = {"reentry_count": REENTRY_COUNTS[visitor_id]}
-            state["zone_enter_time"] = frame_time
-            state["dwell_last_emitted"] = frame_time
-            emit_entry_exit_event(
-                events,
-                args,
-                state,
-                event_type,
-                frame_timestamp,
-                0,
-                confidence,
-                metadata_updates=metadata_updates,
+            should_emit_entry = (
+                track_id not in pre_existing_track_ids
+                and visitor_id not in pre_existing_visitor_ids
+                and can_emit_entry_for_visitor(
+                    visitor_id,
+                    frame_time,
+                    track_state,
+                )
             )
-        elif direction == "EXIT" and not state["exit_emitted"]:
+            if should_emit_entry:
+                event_type = "ENTRY"
+                metadata_updates = None
+                if state["exited"]:
+                    state["session_seq"] += 1
+                    VISITOR_SESSION_SEQS[visitor_id] = state["session_seq"]
+                    REENTRY_COUNTS[visitor_id] = REENTRY_COUNTS.get(visitor_id, 0) + 1
+                    state["exited"] = False
+                    state["exit_emitted"] = False
+                    event_type = "REENTRY"
+                    metadata_updates = {"reentry_count": REENTRY_COUNTS[visitor_id]}
+                state["zone_enter_time"] = frame_time
+                state["dwell_last_emitted"] = frame_time
+                record_entry(visitor_id, frame_time)
+                emit_entry_exit_event(
+                    events,
+                    args,
+                    state,
+                    event_type,
+                    frame_timestamp,
+                    0,
+                    confidence,
+                    metadata_updates=metadata_updates,
+                )
+        elif (
+            direction == "EXIT"
+            and not state["exit_emitted"]
+            and state["entry_emitted"]
+            and visitor_id in entry_cooldown
+        ):
             dwell_ms = int((frame_time - state["zone_enter_time"]).total_seconds() * 1000)
             emit_entry_exit_event(
                 events,
@@ -693,6 +802,8 @@ def process_tracked_person(
                 can_emit_entry_exit(args)
                 and previous_zone == ENTRY_ZONE_NUMBER
                 and not state["exit_emitted"]
+                and state["entry_emitted"]
+                and visitor_id in entry_cooldown
             ):
                 emit_entry_exit_event(
                     events,
@@ -822,6 +933,10 @@ def emit_timed_out_exits(
     for track_id, state in track_state.items():
         if track_id in active_track_ids or state["exit_emitted"]:
             continue
+        if not state["entry_emitted"]:
+            continue
+        if str(state["visitor_id"]) not in entry_cooldown:
+            continue
         elapsed = (frame_time - state["last_seen"]).total_seconds()
         if elapsed < EXIT_TIMEOUT_SECONDS:
             continue
@@ -833,7 +948,7 @@ def emit_timed_out_exits(
             "EXIT",
             frame_timestamp,
             dwell_ms,
-            float(state["last_confidence"]),
+            usable_exit_confidence(state),
             reid_tracker,
         )
 
@@ -853,6 +968,10 @@ def flush_open_exits(
     for state in track_state.values():
         if state["exit_emitted"]:
             continue
+        if not state["entry_emitted"]:
+            continue
+        if str(state["visitor_id"]) not in entry_cooldown:
+            continue
         dwell_ms = int((frame_time - state["zone_enter_time"]).total_seconds() * 1000)
         emit_entry_exit_event(
             events,
@@ -861,13 +980,15 @@ def flush_open_exits(
             "EXIT",
             frame_timestamp,
             dwell_ms,
-            float(state["last_confidence"]),
+            usable_exit_confidence(state),
             reid_tracker,
         )
 
 
 def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
     """Process one MP4 clip and return all emitted events."""
+    entry_cooldown.clear()
+    visitor_exit_emitted.clear()
     zones_dict = zones.load_zones(args.layout)
     pos_transactions = load_pos_transactions(args.pos_file)
     cap = cv2.VideoCapture(args.clip)
@@ -893,6 +1014,8 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
     tracker = create_byte_tracker()
     reid_tracker = ReIDTracker()
     track_state: dict[int, dict[str, Any]] = {}
+    pre_existing_track_ids: set[int] = set()
+    pre_existing_visitor_ids: set[str] = set()
     billing_zone_visitors: dict[str, datetime] = {}
     events: list[dict[str, Any]] = []
 
@@ -983,6 +1106,9 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
                         pos_transactions,
                         events,
                         args,
+                        pre_existing_track_ids,
+                        pre_existing_visitor_ids,
+                        clip_start_dt,
                     )
 
             emit_timed_out_exits(

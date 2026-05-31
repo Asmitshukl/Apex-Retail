@@ -56,6 +56,7 @@ export function DashboardClient() {
   }, []);
 
   const safeMetrics = metrics ?? emptyMetrics;
+  const totalVisitors = metrics?.unique_visitors ?? 0;
   const currentVisitors = Math.max(0, safeMetrics.entry_count - safeMetrics.exit_count);
   const zoneRows = useMemo(
     () => zones.length > 0 ? zones.slice(0, 5) : [
@@ -97,7 +98,7 @@ export function DashboardClient() {
         </section>
 
         <section className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Total Visitors" value={formatNumber(safeMetrics.unique_visitors)} hint="customer IDs seen" icon="↗" />
+          <MetricCard label="Total Visitors" value={formatNumber(totalVisitors)} hint="customer IDs seen" icon="↗" />
           <MetricCard label="Active Visitors" value={formatNumber(currentVisitors)} hint="entry minus exit" icon="◉" />
           <MetricCard label="Staff Detected" value={formatNumber(safeMetrics.staff_seen)} hint="LICM staff matches" icon="◆" />
           <MetricCard label="Billing Queue" value={formatNumber(safeMetrics.billing_queue)} hint="active queue estimate" icon="▣" />
@@ -106,14 +107,14 @@ export function DashboardClient() {
         <section className="grid gap-6 xl:grid-cols-2">
           <LineChart
             title="Customer Activity"
-            subtitle="New customer IDs detected per live tick"
+            subtitle="Cumulative unique visitors over time"
             points={customerPoints}
             valueLabel={formatNumber(Math.round(latestCustomerDelta))}
             valueHint="new customers"
           />
           <LineChart
             title="Employee Activity"
-            subtitle="New staff IDs detected per live tick"
+            subtitle="Staff detections and employee presence after upload"
             points={employeePoints}
             color="#2563eb"
             valueLabel={formatNumber(Math.round(latestStaffDelta))}

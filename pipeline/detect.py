@@ -19,6 +19,12 @@ import zones
 from identity import CrossCameraRegistry
 from tracker import ReIDTracker
 
+try:
+    import onnxruntime as ort
+    ONNXRUNTIME_AVAILABLE = True
+except ImportError:
+    ONNXRUNTIME_AVAILABLE = False
+
 
 PERSON_CLASS_ID = 0
 PERSON_CONFIDENCE_THRESHOLD = 0.4
@@ -36,6 +42,8 @@ LIVE_API_POST_BATCH_SIZE = 5
 CROSS_CAMERA_REGISTRY = CrossCameraRegistry()
 REENTRY_COUNTS: dict[str, int] = {}
 VISITOR_SESSION_SEQS: dict[str, int] = {}
+_licm_session = None
+_licm_class_names: list = ["customer", "staff"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +74,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Post smaller API batches and prefix detection logs for live dashboards",
+    )
+    parser.add_argument(
+        "--licm-model",
+        type=str,
+        default="pipeline/models/staff_classifier.onnx",
+        help="Path to LICM ONNX model for staff classification. "
+        "Falls back to HSV heuristic if file not found.",
     )
     return parser.parse_args()
 
@@ -137,14 +152,70 @@ def make_visitor_id(store_id: str, track_id: int, utc_date_string: str) -> str:
     return "VIS_" + digest.hexdigest()[:6]
 
 
+def load_licm(model_path: str) -> None:
+    global _licm_session, _licm_class_names
+    if not ONNXRUNTIME_AVAILABLE:
+        print("[LICM] onnxruntime not installed — using HSV fallback")
+        return
+    if not os.path.exists(model_path):
+        print(f"[LICM] Model not found at {model_path} — using HSV fallback")
+        return
+    try:
+        _licm_session = ort.InferenceSession(
+            model_path,
+            providers=["CPUExecutionProvider"]
+        )
+        # Load class order from classes.txt next to the model
+        classes_path = os.path.splitext(model_path)[0].replace(
+            "staff_classifier", "classes") + ".txt"
+        classes_path = os.path.join(os.path.dirname(model_path), "classes.txt")
+        if os.path.exists(classes_path):
+            with open(classes_path) as f:
+                _licm_class_names = [l.strip() for l in f if l.strip()]
+        else:
+            _licm_class_names = ["customer", "staff"]
+        print(f"[LICM] Loaded: {model_path}")
+        print(f"[LICM] Classes: {_licm_class_names}")
+    except Exception as e:
+        print(f"[LICM] Failed to load — using HSV fallback: {e}")
+        _licm_session = None
+
+
+def licm_classify(frame: np.ndarray, bbox: np.ndarray) -> bool | None:
+    if _licm_session is None:
+        return None
+    try:
+        x1, y1, x2, y2 = map(int, bbox)
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0 or (y2 - y1) < 30 or (x2 - x1) < 15:
+            return None
+        img = cv2.resize(crop, (224, 224))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))
+        img = np.expand_dims(img, axis=0)
+        input_name = _licm_session.get_inputs()[0].name
+        outputs = _licm_session.run(None, {input_name: img})
+        probs = outputs[0][0]
+        staff_idx = _licm_class_names.index("staff")
+        staff_prob = float(probs[staff_idx])
+        return staff_prob >= 0.60
+    except Exception:
+        return None
+
+
 def is_staff(frame: np.ndarray, bbox: np.ndarray) -> bool:
     """
-    Detect staff by black uniform.
-    Staff at this store wear all-black clothing.
-    Returns True if the LOWER 60% of the person bbox
-    (torso/clothing region, excluding face) has dominant
-    dark/black pixels.
+    Classify a detected person as staff or customer.
+    Primary: LICM ONNX model trained on store footage via Roboflow.
+    Fallback: HSV dark-pixel heuristic (used when LICM not loaded).
     """
+    # Primary path — LICM model
+    licm_result = licm_classify(frame, bbox)
+    if licm_result is not None:
+        return licm_result
+
+    # Fallback path — HSV heuristic (black uniform detection)
     try:
         x1, y1, x2, y2 = map(int, bbox)
         h = y2 - y1
@@ -153,12 +224,9 @@ def is_staff(frame: np.ndarray, bbox: np.ndarray) -> bool:
         if crop.size == 0:
             return False
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        # Staff wear all-black uniforms. Dark pixel ratio > 45% in
-        # clothing region (lower 60% of bbox) flags as staff.
-        # Threshold tuned for Brigade Road store footage.
         dark_mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, 60))
         ratio = cv2.countNonZero(dark_mask) / (crop.shape[0] * crop.shape[1])
-        return ratio > 0.45
+        return ratio > 0.55
     except Exception:
         return False
 
@@ -749,6 +817,7 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
     confidence_floor = adaptive_confidence_floor(args)
 
     model = YOLO("yolov8n.pt").to("cpu")
+    load_licm(args.licm_model)
     tracker = create_byte_tracker()
     reid_tracker = ReIDTracker()
     track_state: dict[int, dict[str, Any]] = {}

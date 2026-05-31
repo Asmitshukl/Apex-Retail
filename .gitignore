@@ -71,3 +71,5 @@ coverage/
 .nyc_output/
 
 yolov8n.pt
+
+pipeline/models/staff_classifier.onnx.data

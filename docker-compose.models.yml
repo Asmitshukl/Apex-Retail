@@ -1,0 +1,24 @@
+services:
+  model-init:
+    image: ${MODEL_IMAGE:-apex-retail-models:local}
+    build:
+      context: .
+      dockerfile: pipeline/models.Dockerfile
+    volumes:
+      - model_files:/target
+    restart: "no"
+
+  api:
+    depends_on:
+      db:
+        condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
+    volumes:
+      - api_uploads:/app/api/uploads/jobs
+      - pipeline_output:/app/pipeline/output
+      - model_files:/app/pipeline/models:ro
+      - ./pipeline/data:/app/pipeline/data:ro
+
+volumes:
+  model_files:

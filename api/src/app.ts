@@ -1,5 +1,6 @@
 import express from "express";
 
+import { corsMiddleware } from "./middleware/cors.js";
 import { errorHandler } from "./middleware/errors.js";
 import { httpLogger } from "./middleware/logger.js";
 import anomaliesRouter from "./routes/anomalies.js";
@@ -13,6 +14,7 @@ import pipelineRouter from "./routes/pipeline.js";
 export function createApp() {
   const app = express();
 
+  app.use(corsMiddleware);
   app.use(express.json({ limit: "10mb" }));
   app.use(httpLogger);
 

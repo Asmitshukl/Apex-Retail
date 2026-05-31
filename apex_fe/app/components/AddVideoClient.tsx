@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AppShell } from "./AppShell";
+import { useLiveDashboard } from "./LiveDashboardProvider";
 import { DIRECT_API_BASE_URL, type PipelineJob } from "../lib/api";
 
 type UploadItem = {
@@ -29,6 +30,7 @@ function cameraIdFromFile(file: File) {
 
 export function AddVideoClient() {
   const router = useRouter();
+  const { setActiveJobId } = useLiveDashboard();
   const [storeId, setStoreId] = useState("STORE_BLR_002");
   const [clipStart, setClipStart] = useState("2026-04-16T08:00:00Z");
   const [sampleFps, setSampleFps] = useState(3);
@@ -87,6 +89,7 @@ export function AddVideoClient() {
 
     const nextJob = await response.json() as PipelineJob;
     setJob(nextJob);
+    setActiveJobId(nextJob.job_id);
     setStatus(autoStart ? "Job uploaded and processing started." : "Job uploaded. Start it when ready.");
     router.push(`/?job=${encodeURIComponent(nextJob.job_id)}`);
   }
@@ -106,7 +109,9 @@ export function AddVideoClient() {
       setStatus(`Start failed with ${response.status}`);
       return;
     }
-    setJob(await response.json() as PipelineJob);
+    const nextJob = await response.json() as PipelineJob;
+    setJob(nextJob);
+    setActiveJobId(nextJob.job_id);
     setStatus("Processing started.");
   }
 

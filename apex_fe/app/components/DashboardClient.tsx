@@ -3,9 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "./AppShell";
+import { emptyMetrics, useLiveDashboard } from "./LiveDashboardProvider";
 import { LineChart } from "./LineChart";
 import { MetricCard } from "./MetricCard";
-import { API_BASE_URL, DIRECT_API_BASE_URL, type EventLog, type LiveMetrics, type PipelineJob, formatNumber } from "../lib/api";
+import { API_BASE_URL, formatNumber } from "../lib/api";
 
 type ZoneRow = {
   zone_id: string;
@@ -14,43 +15,34 @@ type ZoneRow = {
   normalised_score: number;
 };
 
-const emptyMetrics: LiveMetrics = {
-  unique_visitors: 0,
-  staff_seen: 0,
-  entry_count: 0,
-  exit_count: 0,
-  billing_queue: 0,
-  total_events: 0,
-};
-
-function initialLogs(): EventLog[] {
-  return [
-    {
-      id: "welcome",
-      type: "system",
-      message: "Upload camera clips or open a job stream to begin live processing.",
-      at: "--:--",
-    },
-  ];
-}
-
 export function DashboardClient() {
-  const [jobId, setJobId] = useState("");
-  const [job, setJob] = useState<PipelineJob | null>(null);
-  const [metrics, setMetrics] = useState<LiveMetrics>(emptyMetrics);
-  const [logs, setLogs] = useState<EventLog[]>(initialLogs);
-  const [customerPoints, setCustomerPoints] = useState([{ label: "Now", value: 0 }]);
-  const [employeePoints, setEmployeePoints] = useState([{ label: "Now", value: 0 }]);
+  const {
+    activeJobId,
+    setActiveJobId,
+    job,
+    metrics,
+    logs,
+    customerPoints,
+    employeePoints,
+    streamStatus,
+    latestCustomerDelta,
+    latestStaffDelta,
+  } = useLiveDashboard();
+  const [jobIdInput, setJobIdInput] = useState("");
   const [zones, setZones] = useState<ZoneRow[]>([]);
-  const [streamStatus, setStreamStatus] = useState("Idle");
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const nextJobId = params.get("job");
     if (nextJobId) {
-      setJobId(nextJobId);
+      setActiveJobId(nextJobId);
+      setJobIdInput(nextJobId);
     }
-  }, []);
+  }, [setActiveJobId]);
+
+  useEffect(() => {
+    setJobIdInput(activeJobId);
+  }, [activeJobId]);
 
   useEffect(() => {
     fetch(`${API_BASE_URL}/stores/STORE_BLR_002/heatmap`)
@@ -63,92 +55,8 @@ export function DashboardClient() {
       .catch(() => undefined);
   }, []);
 
-  useEffect(() => {
-    if (!jobId.trim()) {
-      return;
-    }
-
-    const source = new EventSource(`${DIRECT_API_BASE_URL}/pipeline/jobs/${jobId.trim()}/stream`);
-    setStreamStatus("Connected");
-
-    function pushLog(type: string, message: string) {
-      setLogs((current) => [
-        { id: `${Date.now()}-${Math.random()}`, type, message, at: new Date().toLocaleTimeString() },
-        ...current,
-      ].slice(0, 12));
-    }
-
-    function updateGraph(next: LiveMetrics) {
-      const label = new Date().toLocaleTimeString([], { minute: "2-digit", second: "2-digit" });
-      setCustomerPoints((current) => [
-        ...current.slice(-8),
-        { label, value: next.unique_visitors + next.entry_count + next.billing_queue },
-      ]);
-      setEmployeePoints((current) => [
-        ...current.slice(-8),
-        { label, value: next.staff_seen },
-      ]);
-    }
-
-    source.addEventListener("snapshot", (event) => {
-      const nextJob = JSON.parse(event.data) as PipelineJob;
-      setJob(nextJob);
-      setMetrics(nextJob.live_metrics ?? emptyMetrics);
-      updateGraph(nextJob.live_metrics ?? emptyMetrics);
-      pushLog("snapshot", `Loaded job ${nextJob.job_id} with ${nextJob.cameras.length} cameras.`);
-    });
-
-    source.addEventListener("batch_ingested", (event) => {
-      const payload = JSON.parse(event.data);
-      if (payload.live_metrics) {
-        setMetrics(payload.live_metrics);
-        updateGraph(payload.live_metrics);
-      }
-      pushLog(
-        "batch",
-        `${payload.camera_id}: ${payload.accepted} accepted, ${payload.duplicates} duplicate, ${payload.rejected} rejected.`,
-      );
-    });
-
-    source.addEventListener("live_metrics", (event) => {
-      const next = JSON.parse(event.data) as LiveMetrics;
-      setMetrics(next);
-      updateGraph(next);
-    });
-
-    source.addEventListener("camera_started", (event) => {
-      const payload = JSON.parse(event.data);
-      pushLog("camera", `${payload.camera_id} started as ${payload.camera_role}.`);
-    });
-
-    source.addEventListener("camera_complete", (event) => {
-      const payload = JSON.parse(event.data);
-      pushLog("camera", `${payload.camera_id} complete with ${payload.events_written} events.`);
-    });
-
-    source.addEventListener("job_complete", (event) => {
-      const nextJob = JSON.parse(event.data) as PipelineJob;
-      setJob(nextJob);
-      pushLog("complete", `Job complete. ${nextJob.summary?.total_events ?? 0} events processed.`);
-    });
-
-    source.addEventListener("job_failed", (event) => {
-      const nextJob = JSON.parse(event.data) as PipelineJob;
-      setJob(nextJob);
-      pushLog("failed", nextJob.error ?? "Job failed.");
-    });
-
-    source.onerror = () => {
-      setStreamStatus("Reconnecting");
-    };
-
-    return () => {
-      source.close();
-      setStreamStatus("Idle");
-    };
-  }, [jobId]);
-
-  const currentVisitors = Math.max(0, metrics.entry_count - metrics.exit_count);
+  const safeMetrics = metrics ?? emptyMetrics;
+  const currentVisitors = Math.max(0, safeMetrics.entry_count - safeMetrics.exit_count);
   const zoneRows = useMemo(
     () => zones.length > 0 ? zones.slice(0, 5) : [
       { zone_id: "Makeup", frequency: 0, avg_dwell_ms: 0, normalised_score: 0 },
@@ -170,11 +78,17 @@ export function DashboardClient() {
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <input
-              value={jobId}
-              onChange={(event) => setJobId(event.target.value)}
+              value={jobIdInput}
+              onChange={(event) => setJobIdInput(event.target.value)}
               placeholder="Paste job id for stream"
               className="focus-ring h-11 rounded-lg border border-slate-300 bg-white px-3 text-sm"
             />
+            <button
+              onClick={() => setActiveJobId(jobIdInput)}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm font-semibold"
+            >
+              Open Stream
+            </button>
             <span className="soft-badge px-3 py-2 text-sm font-semibold">{streamStatus}</span>
             <Link href="/add-video" className="rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white">
               Add Video
@@ -183,15 +97,28 @@ export function DashboardClient() {
         </section>
 
         <section className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Total Visitors" value={formatNumber(metrics.unique_visitors)} hint="customer IDs seen" icon="↗" />
+          <MetricCard label="Total Visitors" value={formatNumber(safeMetrics.unique_visitors)} hint="customer IDs seen" icon="↗" />
           <MetricCard label="Active Visitors" value={formatNumber(currentVisitors)} hint="entry minus exit" icon="◉" />
-          <MetricCard label="Staff Detected" value={formatNumber(metrics.staff_seen)} hint="LICM staff matches" icon="◆" />
-          <MetricCard label="Billing Queue" value={formatNumber(metrics.billing_queue)} hint="active queue estimate" icon="▣" />
+          <MetricCard label="Staff Detected" value={formatNumber(safeMetrics.staff_seen)} hint="LICM staff matches" icon="◆" />
+          <MetricCard label="Billing Queue" value={formatNumber(safeMetrics.billing_queue)} hint="active queue estimate" icon="▣" />
         </section>
 
         <section className="grid gap-6 xl:grid-cols-2">
-          <LineChart title="Customer Activity" subtitle="Entries, exits, queue and zone flow over time" points={customerPoints} />
-          <LineChart title="Employee Activity" subtitle="Staff detections and employee presence over time" points={employeePoints} color="#2563eb" />
+          <LineChart
+            title="Customer Activity"
+            subtitle="New customer IDs detected per live tick"
+            points={customerPoints}
+            valueLabel={formatNumber(Math.round(latestCustomerDelta))}
+            valueHint="new customers"
+          />
+          <LineChart
+            title="Employee Activity"
+            subtitle="New staff IDs detected per live tick"
+            points={employeePoints}
+            color="#2563eb"
+            valueLabel={formatNumber(Math.round(latestStaffDelta))}
+            valueHint="new employees"
+          />
         </section>
 
         <section className="grid gap-6 xl:grid-cols-[1.4fr_0.8fr]">
@@ -219,12 +146,12 @@ export function DashboardClient() {
           <div className="grid gap-6">
             <div className="card p-6">
               <h2 className="text-lg font-bold">Entry Details</h2>
-              <p className="mt-4 text-4xl font-bold">{formatNumber(metrics.entry_count)}</p>
+              <p className="mt-4 text-4xl font-bold">{formatNumber(safeMetrics.entry_count)}</p>
               <p className="mt-2 text-sm text-slate-500">ENTRY events received from entry cameras.</p>
             </div>
             <div className="card p-6">
               <h2 className="text-lg font-bold">Exit Details</h2>
-              <p className="mt-4 text-4xl font-bold">{formatNumber(metrics.exit_count)}</p>
+              <p className="mt-4 text-4xl font-bold">{formatNumber(safeMetrics.exit_count)}</p>
               <p className="mt-2 text-sm text-slate-500">EXIT events and timeout exits from entry cameras.</p>
             </div>
           </div>

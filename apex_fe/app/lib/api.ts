@@ -21,6 +21,8 @@ export const DIRECT_API_BASE_URL = getDirectApiBaseUrl();
 export type LiveMetrics = {
   unique_visitors: number;
   staff_seen: number;
+  customer_delta: number;
+  staff_delta: number;
   entry_count: number;
   exit_count: number;
   billing_queue: number;

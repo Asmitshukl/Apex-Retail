@@ -91,7 +91,7 @@ export function AddVideoClient() {
     setJob(nextJob);
     setActiveJobId(nextJob.job_id);
     setStatus(autoStart ? "Job uploaded and processing started." : "Job uploaded. Start it when ready.");
-    router.push(`/?job=${encodeURIComponent(nextJob.job_id)}`);
+    router.push(`/dashboard?job=${encodeURIComponent(nextJob.job_id)}`);
   }
 
   async function startJob() {
@@ -233,7 +233,7 @@ export function AddVideoClient() {
             <div className="mt-6 rounded-lg bg-emerald-50 p-5">
               <p className="text-sm font-semibold text-emerald-800">Created job {job.job_id}</p>
               <p className="mt-1 text-sm text-emerald-700">Status: {job.status}</p>
-              <Link href={`/?job=${job.job_id}`} className="mt-4 inline-block rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white">
+              <Link href={`/dashboard?job=${job.job_id}`} className="mt-4 inline-block rounded-lg bg-emerald-600 px-4 py-3 text-sm font-semibold text-white">
                 Open Dashboard
               </Link>
             </div>

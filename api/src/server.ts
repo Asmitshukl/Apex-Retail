@@ -1,5 +1,4 @@
 import cluster from "node:cluster";
-import os from "node:os";
 import type { Server } from "node:http";
 
 import prisma from "./db/client.js";
@@ -8,7 +7,7 @@ import { logger } from "./middleware/logger.js";
 import { createApp } from "./app.js";
 
 const PORT = Number(process.env["PORT"] ?? 3001);
-const WORKER_COUNT = Number(process.env["WEB_CONCURRENCY"] ?? os.availableParallelism());
+const WORKER_COUNT = Number(process.env["WEB_CONCURRENCY"] ?? 1);
 
 async function preparePrimaryProcess(): Promise<void> {
   await prisma.$connect();

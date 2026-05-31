@@ -903,6 +903,7 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
     empty_store_start_time: datetime | None = None
     next_empty_heartbeat_s = HEARTBEAT_INTERVAL_SECONDS
     posted_event_count = 0
+    written_event_count = 0
     try:
         while True:
             ok, frame = cap.read()
@@ -995,6 +996,9 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
                 active_track_ids,
             )
             finalize_frame_entry_metadata(events, frame_event_start)
+            for event in events[written_event_count:]:
+                emit.write_event(event, args.output)
+            written_event_count = len(events)
             posted_event_count = flush_api_events(events, args, posted_event_count)
 
             frame_number += 1
@@ -1010,8 +1014,9 @@ def process_clip(args: argparse.Namespace) -> list[dict[str, Any]]:
         last_frame_timestamp,
     )
 
-    for event in events:
+    for event in events[written_event_count:]:
         emit.write_event(event, args.output)
+    written_event_count = len(events)
 
     posted_event_count = flush_api_events(events, args, posted_event_count, force=True)
 

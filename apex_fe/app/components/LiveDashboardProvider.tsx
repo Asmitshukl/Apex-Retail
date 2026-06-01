@@ -109,6 +109,8 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
   const pendingStaffDelta = useRef(0);
   const metricsRef = useRef<LiveMetrics>(emptyMetrics);
   const processingActiveRef = useRef(false);
+  const chartCustomerValueRef = useRef(0);
+  const chartStaffValueRef = useRef(0);
 
   const pushLog = useCallback((type: string, message: string) => {
     setLogs((current) => [nextLog(type, message), ...current].slice(0, 24));
@@ -124,11 +126,6 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
     if (normalised.staff_delta > 0) {
       pendingStaffDelta.current += normalised.staff_delta;
     }
-    if (processingActiveRef.current) {
-      const label = timeLabel();
-      setCustomerPoints((current) => [...current.slice(-59), { label, value: normalised.unique_visitors }]);
-      setEmployeePoints((current) => [...current.slice(-59), { label, value: normalised.staff_seen }]);
-    }
     setLatestCustomerDelta(normalised.customer_delta);
     setLatestStaffDelta(normalised.staff_delta);
   }, []);
@@ -137,11 +134,6 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
     const normalised = normaliseMetrics(next);
     metricsRef.current = normalised;
     setMetrics(normalised);
-    if (processingActiveRef.current) {
-      const label = timeLabel();
-      setCustomerPoints((current) => [...current.slice(-59), { label, value: normalised.unique_visitors }]);
-      setEmployeePoints((current) => [...current.slice(-59), { label, value: normalised.staff_seen }]);
-    }
     setLatestCustomerDelta(normalised.customer_delta);
     setLatestStaffDelta(normalised.staff_delta);
   }, []);
@@ -150,6 +142,8 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
     pendingCustomerDelta.current = 0;
     pendingStaffDelta.current = 0;
     metricsRef.current = emptyMetrics;
+    chartCustomerValueRef.current = 0;
+    chartStaffValueRef.current = 0;
     processingActiveRef.current = true;
     setJob(null);
     setMetrics(emptyMetrics);
@@ -184,6 +178,8 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
       setJob(snapshot.job ?? null);
       metricsRef.current = normaliseMetrics(snapshot.metrics);
       processingActiveRef.current = snapshot.job?.status === "running";
+      chartCustomerValueRef.current = snapshot.customerPoints?.at(-1)?.value ?? metricsRef.current.unique_visitors;
+      chartStaffValueRef.current = snapshot.employeePoints?.at(-1)?.value ?? metricsRef.current.staff_seen;
       setMetrics(metricsRef.current);
       setLogs(snapshot.logs?.length ? snapshot.logs.slice(0, 24) : initialSnapshot.logs);
       setCustomerPoints(snapshot.customerPoints?.length ? snapshot.customerPoints.slice(-60) : initialSnapshot.customerPoints);
@@ -276,6 +272,11 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
       processingActiveRef.current = false;
       setJob(nextJob);
       applyMetricsWithoutDelta(nextJob.live_metrics);
+      chartCustomerValueRef.current = nextJob.live_metrics.unique_visitors;
+      chartStaffValueRef.current = nextJob.live_metrics.staff_seen;
+      const label = timeLabel();
+      setCustomerPoints((current) => [...current.slice(-59), { label, value: nextJob.live_metrics.unique_visitors }]);
+      setEmployeePoints((current) => [...current.slice(-59), { label, value: nextJob.live_metrics.staff_seen }]);
       setStreamStatus("Complete");
       pushLog("complete", `Job complete. ${nextJob.summary?.total_events ?? 0} events processed.`);
     });
@@ -304,6 +305,44 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
       source.close();
     };
   }, [activeJobId, applyMetrics, applyMetricsWithoutDelta, pushLog, restored]);
+
+  useEffect(() => {
+    if (!restored || !activeJobId) {
+      return;
+    }
+
+    const smoothNext = (current: number, target: number) => {
+      const distance = target - current;
+      if (Math.abs(distance) < 0.2) {
+        return target;
+      }
+      return current + distance * 0.28;
+    };
+
+    const timer = window.setInterval(() => {
+      if (!processingActiveRef.current) {
+        return;
+      }
+
+      const latest = metricsRef.current;
+      chartCustomerValueRef.current = smoothNext(chartCustomerValueRef.current, latest.unique_visitors);
+      chartStaffValueRef.current = smoothNext(chartStaffValueRef.current, latest.staff_seen);
+      const label = timeLabel();
+
+      setCustomerPoints((current) => [
+        ...current.slice(-59),
+        { label, value: Number(chartCustomerValueRef.current.toFixed(2)) },
+      ]);
+      setEmployeePoints((current) => [
+        ...current.slice(-59),
+        { label, value: Number(chartStaffValueRef.current.toFixed(2)) },
+      ]);
+    }, 900);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeJobId, restored]);
 
   const value = useMemo<LiveDashboardContextValue>(() => ({
     activeJobId,

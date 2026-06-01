@@ -12,13 +12,29 @@ type LineChartProps = {
   valueHint?: string;
 };
 
-function buildPath(points: Point[], width: number, height: number) {
-  const max = Math.max(1, ...points.map((point) => point.value));
-  return points
+function pointCoordinates(points: Point[], width: number, height: number, max: number) {
+  return points.map((point, index) => {
+    const x = points.length === 1 ? width / 2 : (index / (points.length - 1)) * width;
+    const y = height - (point.value / max) * height;
+    return { x, y };
+  });
+}
+
+function buildPath(points: Point[], width: number, height: number, max: number) {
+  const coordinates = pointCoordinates(points, width, height, max);
+  if (coordinates.length === 1) {
+    const point = coordinates[0];
+    return `M 0 ${point.y.toFixed(2)} C ${width * 0.33} ${point.y.toFixed(2)} ${width * 0.66} ${point.y.toFixed(2)} ${width} ${point.y.toFixed(2)}`;
+  }
+
+  return coordinates
     .map((point, index) => {
-      const x = points.length === 1 ? width / 2 : (index / (points.length - 1)) * width;
-      const y = height - (point.value / max) * height;
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+      if (index === 0) {
+        return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+      }
+      const previous = coordinates[index - 1];
+      const controlOffset = (point.x - previous.x) * 0.5;
+      return `C ${(previous.x + controlOffset).toFixed(2)} ${previous.y.toFixed(2)} ${(point.x - controlOffset).toFixed(2)} ${point.y.toFixed(2)} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
     })
     .join(" ");
 }
@@ -27,8 +43,10 @@ export function LineChart({ title, subtitle, points, color = "#00a878", valueLab
   const width = 640;
   const height = 230;
   const safePoints = points.length > 0 ? points : [{ label: "Now", value: 0 }];
-  const path = buildPath(safePoints, width, height);
-  const maxValue = Math.max(1, ...safePoints.map((point) => point.value));
+  const rawMax = Math.max(1, ...safePoints.map((point) => point.value));
+  const maxValue = Math.max(1, Math.ceil(rawMax * 1.15));
+  const path = buildPath(safePoints, width, height, maxValue);
+  const coordinates = pointCoordinates(safePoints, width, height, maxValue);
   const yAxis = [maxValue, maxValue * 0.75, maxValue * 0.5, maxValue * 0.25, 0];
   const tickEvery = Math.max(1, Math.ceil(safePoints.length / 6));
 
@@ -76,13 +94,21 @@ export function LineChart({ title, subtitle, points, color = "#00a878", valueLab
             className="transition-all duration-700 ease-out"
           />
           {safePoints.map((point, index) => {
-            const max = Math.max(1, ...safePoints.map((item) => item.value));
-            const x = safePoints.length === 1 ? width / 2 : (index / (safePoints.length - 1)) * width;
-            const y = height - (point.value / max) * height;
+            const { x, y } = coordinates[index];
             const showLabel = index === 0 || index === safePoints.length - 1 || index % tickEvery === 0;
             return (
               <g key={`${point.label}-${index}`}>
-                <circle cx={x} cy={y} r={showLabel ? "5" : "3"} fill="#fff" stroke={color} strokeWidth={showLabel ? "3" : "2"} />
+                {showLabel ? (
+                  <circle
+                    cx={x}
+                    cy={y}
+                    r="5"
+                    fill="#fff"
+                    stroke={color}
+                    strokeWidth="3"
+                    className="transition-all duration-700 ease-out"
+                  />
+                ) : null}
                 {showLabel ? (
                   <text x={x} y={height + 28} textAnchor="middle" fontSize="12" fill="#94a3b8">
                     {point.label}

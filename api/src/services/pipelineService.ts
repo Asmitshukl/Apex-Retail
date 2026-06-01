@@ -75,6 +75,29 @@ let lastRunCompletedAt: string | null = null;
 const jobs = new Map<string, PipelineJob>();
 const jobStreams = new Map<string, Set<Response>>();
 
+type SerializedCamera = {
+  camera_id: string;
+  camera_role: "entry" | "floor" | "billing";
+  clip_path?: string;
+  output_path?: string;
+  filename: string;
+  status: "pending" | "uploading" | "running" | "complete" | "failed" | "cancelled";
+  events_written: number;
+  accepted: number;
+  duplicates: number;
+  rejected: number;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+type SerializedPipelineJob = Omit<ReturnType<typeof publicJob>, "cameras"> & {
+  job_dir?: string;
+  upload_dir?: string;
+  output_dir?: string;
+  cameras: SerializedCamera[];
+};
+
 function registerJobChild(job: PipelineJob, child: ReturnType<typeof spawn>): void {
   job.children.push(child);
   job.child = child;
@@ -221,6 +244,96 @@ function publicJob(job: PipelineJob) {
   };
 }
 
+async function persistJob(job: PipelineJob): Promise<void> {
+  const payload: SerializedPipelineJob = {
+    ...publicJob(job),
+    job_dir: job.job_dir,
+    upload_dir: job.upload_dir,
+    output_dir: job.output_dir,
+    cameras: job.cameras.map((camera) => ({
+      camera_id: camera.camera_id,
+      camera_role: camera.camera_role,
+      clip_path: camera.clip_path,
+      output_path: camera.output_path,
+      filename: camera.filename,
+      status: camera.status,
+      events_written: camera.events_written,
+      accepted: camera.accepted,
+      duplicates: camera.duplicates,
+      rejected: camera.rejected,
+      error: camera.error,
+      started_at: camera.started_at,
+      completed_at: camera.completed_at,
+    })),
+  };
+  await fs.mkdir(job.job_dir, { recursive: true });
+  await fs.writeFile(path.join(job.job_dir, "manifest.json"), JSON.stringify(payload, null, 2));
+}
+
+function hydrateJob(raw: SerializedPipelineJob): PipelineJob {
+  const jobId = raw.job_id;
+  const jobDir = raw.job_dir ?? path.join(uploadsDir, jobId);
+  const uploadDir = raw.upload_dir ?? path.join(jobDir, "videos");
+  const jobOutputDir = raw.output_dir ?? path.join(jobDir, "output");
+  const job: PipelineJob = {
+    job_id: jobId,
+    store_id: raw.store_id,
+    clip_start: raw.clip_start,
+    sample_fps: raw.sample_fps,
+    status: raw.status as JobStatus,
+    created_at: raw.created_at,
+    started_at: raw.started_at,
+    completed_at: raw.completed_at,
+    job_dir: jobDir,
+    upload_dir: uploadDir,
+    output_dir: jobOutputDir,
+    cameras: raw.cameras.map((camera) => ({
+      camera_id: camera.camera_id,
+      camera_role: camera.camera_role,
+      clip_path: camera.clip_path ?? path.join(uploadDir, camera.filename),
+      output_path: camera.output_path ?? path.join(jobOutputDir, `${camera.camera_id}.jsonl`),
+      filename: camera.filename,
+      status: camera.status,
+      events_written: camera.events_written,
+      accepted: camera.accepted,
+      duplicates: camera.duplicates,
+      rejected: camera.rejected,
+      error: camera.error,
+      started_at: camera.started_at,
+      completed_at: camera.completed_at,
+    })),
+    upload_progress: raw.upload_progress ?? emptyUploadProgress(),
+    live_metrics: raw.live_metrics ?? emptyLiveMetrics(),
+    customer_ids: new Set<string>(),
+    staff_ids: new Set<string>(),
+    summary: raw.summary,
+    error: raw.error,
+    child: null,
+    children: [],
+  };
+  return job;
+}
+
+async function getJob(jobId: string | undefined): Promise<PipelineJob | undefined> {
+  if (!jobId) {
+    return undefined;
+  }
+  const existing = jobs.get(jobId);
+  if (existing) {
+    return existing;
+  }
+
+  try {
+    const manifestPath = path.join(uploadsDir, jobId, "manifest.json");
+    const raw = JSON.parse(await fs.readFile(manifestPath, "utf8")) as SerializedPipelineJob;
+    const job = hydrateJob(raw);
+    jobs.set(jobId, job);
+    return job;
+  } catch {
+    return undefined;
+  }
+}
+
 function sendSse(res: Response, type: string, payload: unknown): void {
   res.write(`event: ${type}\n`);
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -313,7 +426,7 @@ async function createPipelineJob(params: {
   };
 
   jobs.set(jobId, job);
-  await fs.writeFile(path.join(jobDir, "manifest.json"), JSON.stringify(publicJob(job), null, 2));
+  await persistJob(job);
   return job;
 }
 
@@ -355,7 +468,7 @@ async function attachUploadedFilesToJob(
     percent: 100,
     status: "complete",
   };
-  await fs.writeFile(path.join(job.job_dir, "manifest.json"), JSON.stringify(publicJob(job), null, 2));
+  await persistJob(job);
 }
 
 function updateLiveMetrics(job: PipelineJob, events: unknown[]): void {
@@ -712,6 +825,7 @@ router.post("/jobs/upload", async (req, res) => {
       void runUploadedJob(job);
     }
 
+    await persistJob(job);
     res.status(201).json(publicJob(job));
   } catch (err) {
     logger.error(err, "Pipeline upload failed");
@@ -746,7 +860,7 @@ router.post("/jobs", async (req, res) => {
 
 router.post("/jobs/:jobId/upload", async (req, res) => {
   const jobId = req.params["jobId"];
-  const job = jobId ? jobs.get(jobId) : undefined;
+  const job = await getJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
@@ -811,9 +925,9 @@ router.post("/jobs/:jobId/upload", async (req, res) => {
   }
 });
 
-router.get("/jobs/:jobId", (req, res) => {
+router.get("/jobs/:jobId", async (req, res) => {
   const jobId = req.params["jobId"];
-  const job = jobId ? jobs.get(jobId) : undefined;
+  const job = await getJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
@@ -821,9 +935,9 @@ router.get("/jobs/:jobId", (req, res) => {
   res.json(publicJob(job));
 });
 
-router.get("/jobs/:jobId/stream", (req, res) => {
+router.get("/jobs/:jobId/stream", async (req, res) => {
   const jobId = req.params["jobId"];
-  const job = jobId ? jobs.get(jobId) : undefined;
+  const job = await getJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
@@ -854,9 +968,9 @@ router.get("/jobs/:jobId/stream", (req, res) => {
   });
 });
 
-router.post("/jobs/:jobId/start", (req, res) => {
+router.post("/jobs/:jobId/start", async (req, res) => {
   const jobId = req.params["jobId"];
-  const job = jobId ? jobs.get(jobId) : undefined;
+  const job = await getJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
@@ -878,9 +992,9 @@ router.post("/jobs/:jobId/start", (req, res) => {
   res.json(publicJob(job));
 });
 
-router.post("/jobs/:jobId/cancel", (req, res) => {
+router.post("/jobs/:jobId/cancel", async (req, res) => {
   const jobId = req.params["jobId"];
-  const job = jobId ? jobs.get(jobId) : undefined;
+  const job = await getJob(jobId);
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;

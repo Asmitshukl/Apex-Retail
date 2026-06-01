@@ -18,6 +18,7 @@ import type {
   LiveMetrics,
   PipelineJob,
   RunRequest,
+  UploadProgress,
   UploadedCamera,
 } from "./pipeline/types.js";
 
@@ -35,6 +36,12 @@ const runRequestSchema = z.object({
 const runAllRequestSchema = z.object({
   store_id: z.string().min(1),
   clip_start: z.string().datetime(),
+});
+
+const createJobRequestSchema = z.object({
+  store_id: z.string().min(1).default("STORE_BLR_002"),
+  clip_start: z.string().datetime().optional(),
+  sample_fps: z.number().positive().optional(),
 });
 
 const runLicmTestRequestSchema = z.object({
@@ -175,6 +182,15 @@ function emptyLiveMetrics(): LiveMetrics {
   };
 }
 
+function emptyUploadProgress(): UploadProgress {
+  return {
+    uploaded_bytes: 0,
+    total_bytes: null,
+    percent: 0,
+    status: "waiting",
+  };
+}
+
 function publicJob(job: PipelineJob) {
   return {
     job_id: job.job_id,
@@ -198,6 +214,7 @@ function publicJob(job: PipelineJob) {
       started_at: camera.started_at,
       completed_at: camera.completed_at,
     })),
+    upload_progress: job.upload_progress,
     live_metrics: job.live_metrics,
     summary: job.summary,
     error: job.error,
@@ -239,6 +256,106 @@ function eventType(event: unknown): string | null {
     return null;
   }
   return event["event_type"];
+}
+
+function parseCameraRoles(raw: string | undefined): Record<string, "entry" | "floor" | "billing"> {
+  if (!raw) {
+    return {};
+  }
+  const parsed = JSON.parse(raw) as Record<string, "entry" | "floor" | "billing">;
+  return Object.fromEntries(
+    Object.entries(parsed).map(([cameraId, role]) => [safeName(cameraId).toUpperCase(), role]),
+  );
+}
+
+async function createPipelineJob(params: {
+  storeId: string;
+  clipStart: string;
+  sampleFps: number;
+}): Promise<PipelineJob> {
+  const jobId = `job_${randomUUID()}`;
+  const jobDir = path.join(uploadsDir, jobId);
+  const uploadDir = path.join(jobDir, "videos");
+  const jobOutputDir = path.join(jobDir, "output");
+
+  await fs.mkdir(uploadDir, { recursive: true });
+  await fs.mkdir(jobOutputDir, { recursive: true });
+
+  const resetResult = await prisma.event.deleteMany({
+    where: { storeId: params.storeId },
+  });
+  logger.info(
+    { store_id: params.storeId, deleted_events: resetResult.count, job_id: jobId },
+    "Cleared previous store events before new upload job",
+  );
+
+  const job: PipelineJob = {
+    job_id: jobId,
+    store_id: params.storeId,
+    clip_start: params.clipStart,
+    sample_fps: Number.isFinite(params.sampleFps) && params.sampleFps > 0 ? params.sampleFps : 3,
+    status: "created",
+    created_at: new Date().toISOString(),
+    started_at: null,
+    completed_at: null,
+    job_dir: jobDir,
+    upload_dir: uploadDir,
+    output_dir: jobOutputDir,
+    cameras: [],
+    upload_progress: emptyUploadProgress(),
+    live_metrics: emptyLiveMetrics(),
+    customer_ids: new Set<string>(),
+    staff_ids: new Set<string>(),
+    summary: null,
+    error: null,
+    child: null,
+    children: [],
+  };
+
+  jobs.set(jobId, job);
+  await fs.writeFile(path.join(jobDir, "manifest.json"), JSON.stringify(publicJob(job), null, 2));
+  return job;
+}
+
+async function attachUploadedFilesToJob(
+  job: PipelineJob,
+  files: Array<{ fieldName: string; filename: string; path: string; size: number }>,
+  cameraRoles: Record<string, "entry" | "floor" | "billing">,
+): Promise<void> {
+  if (files.length === 0) {
+    throw new Error("At least one uploaded video file is required");
+  }
+
+  await fs.mkdir(job.output_dir, { recursive: true });
+  job.cameras = files.map((file) => {
+    const rawCameraId = ["video", "videos", "file", "files"].includes(file.fieldName)
+      ? path.basename(file.filename, path.extname(file.filename))
+      : file.fieldName;
+    const cameraId = safeName(rawCameraId).toUpperCase();
+    return {
+      camera_id: cameraId,
+      camera_role: cameraRoles[cameraId] ?? inferCameraRole(cameraId),
+      clip_path: file.path,
+      output_path: path.join(job.output_dir, `${cameraId}.jsonl`),
+      filename: file.filename,
+      status: "pending",
+      events_written: 0,
+      accepted: 0,
+      duplicates: 0,
+      rejected: 0,
+      error: null,
+      started_at: null,
+      completed_at: null,
+    };
+  });
+  job.status = "uploaded";
+  job.upload_progress = {
+    uploaded_bytes: job.upload_progress.total_bytes ?? job.upload_progress.uploaded_bytes,
+    total_bytes: job.upload_progress.total_bytes,
+    percent: 100,
+    status: "complete",
+  };
+  await fs.writeFile(path.join(job.job_dir, "manifest.json"), JSON.stringify(publicJob(job), null, 2));
 }
 
 function updateLiveMetrics(job: PipelineJob, events: unknown[]): void {
@@ -572,81 +689,24 @@ function cameraRunForId(cameraId: string): RunRequest | null {
 }
 
 router.post("/jobs/upload", async (req, res) => {
-  const jobId = `job_${randomUUID()}`;
-  const jobDir = path.join(uploadsDir, jobId);
-  const uploadDir = path.join(jobDir, "videos");
-  const jobOutputDir = path.join(jobDir, "output");
-
   try {
+    const jobId = `job_${randomUUID()}`;
+    const jobDir = path.join(uploadsDir, jobId);
+    const uploadDir = path.join(jobDir, "videos");
     const parsedUpload = await parseMultipartUpload(req, uploadDir);
     const storeId = parsedUpload.fields["store_id"]?.trim() || "STORE_BLR_002";
     const clipStart = parsedUpload.fields["clip_start"]?.trim() || new Date().toISOString();
     const sampleFps = Number(parsedUpload.fields["sample_fps"] ?? 3);
     const autoStart = ["1", "true", "yes"].includes((parsedUpload.fields["auto_start"] ?? "").toLowerCase());
-    const cameraRoles = parsedUpload.fields["camera_roles"]
-      ? JSON.parse(parsedUpload.fields["camera_roles"]) as Record<string, "entry" | "floor" | "billing">
-      : {};
+    const cameraRoles = parseCameraRoles(parsedUpload.fields["camera_roles"]);
 
-    if (parsedUpload.files.length === 0) {
-      res.status(400).json({ error: "At least one uploaded video file is required" });
-      return;
-    }
-
-    const resetResult = await prisma.event.deleteMany({
-      where: { storeId },
+    const job = await createPipelineJob({
+      storeId,
+      clipStart,
+      sampleFps,
     });
-    logger.info(
-      { store_id: storeId, deleted_events: resetResult.count, job_id: jobId },
-      "Cleared previous store events before new upload job",
-    );
-
-    await fs.mkdir(jobOutputDir, { recursive: true });
-    const cameras: UploadedCamera[] = parsedUpload.files.map((file) => {
-      const rawCameraId = ["video", "videos", "file", "files"].includes(file.fieldName)
-        ? path.basename(file.filename, path.extname(file.filename))
-        : file.fieldName;
-      const cameraId = safeName(rawCameraId).toUpperCase();
-      return {
-        camera_id: cameraId,
-        camera_role: cameraRoles[cameraId] ?? inferCameraRole(cameraId),
-        clip_path: file.path,
-        output_path: path.join(jobOutputDir, `${cameraId}.jsonl`),
-        filename: file.filename,
-        status: "pending",
-        events_written: 0,
-        accepted: 0,
-        duplicates: 0,
-        rejected: 0,
-        error: null,
-        started_at: null,
-        completed_at: null,
-      };
-    });
-
-    const job: PipelineJob = {
-      job_id: jobId,
-      store_id: storeId,
-      clip_start: clipStart,
-      sample_fps: Number.isFinite(sampleFps) && sampleFps > 0 ? sampleFps : 3,
-      status: "uploaded",
-      created_at: new Date().toISOString(),
-      started_at: null,
-      completed_at: null,
-      job_dir: jobDir,
-      upload_dir: uploadDir,
-      output_dir: jobOutputDir,
-      cameras,
-      live_metrics: emptyLiveMetrics(),
-      customer_ids: new Set<string>(),
-      staff_ids: new Set<string>(),
-      summary: null,
-      error: null,
-      child: null,
-      children: [],
-    };
-
-    jobs.set(jobId, job);
-    await fs.writeFile(path.join(jobDir, "manifest.json"), JSON.stringify(publicJob(job), null, 2));
+    job.upload_dir = uploadDir;
+    await attachUploadedFilesToJob(job, parsedUpload.files, cameraRoles);
 
     if (autoStart) {
       void runUploadedJob(job);
@@ -657,6 +717,96 @@ router.post("/jobs/upload", async (req, res) => {
     logger.error(err, "Pipeline upload failed");
     res.status(400).json({
       error: err instanceof Error ? err.message : "Upload failed",
+    });
+  }
+});
+
+router.post("/jobs", async (req, res) => {
+  const parsed = createJobRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid job request", details: parsed.error.issues });
+    return;
+  }
+
+  try {
+    const job = await createPipelineJob({
+      storeId: parsed.data.store_id,
+      clipStart: parsed.data.clip_start ?? new Date().toISOString(),
+      sampleFps: parsed.data.sample_fps ?? 3,
+    });
+    broadcastJob(job, "job_created", publicJob(job));
+    res.status(201).json(publicJob(job));
+  } catch (err) {
+    logger.error(err, "Pipeline job creation failed");
+    res.status(400).json({
+      error: err instanceof Error ? err.message : "Job creation failed",
+    });
+  }
+});
+
+router.post("/jobs/:jobId/upload", async (req, res) => {
+  const jobId = req.params["jobId"];
+  const job = jobId ? jobs.get(jobId) : undefined;
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+  if (job.status === "running" || job.status === "complete") {
+    res.status(409).json({ error: `Job is already ${job.status}` });
+    return;
+  }
+
+  let lastProgressBroadcast = 0;
+  try {
+    job.status = "uploading";
+    job.error = null;
+    job.upload_progress = {
+      uploaded_bytes: 0,
+      total_bytes: null,
+      percent: 0,
+      status: "uploading",
+    };
+    broadcastJob(job, "upload_started", publicJob(job));
+
+    const parsedUpload = await parseMultipartUpload(req, job.upload_dir, ({ uploadedBytes, totalBytes }) => {
+      const now = Date.now();
+      const percent = totalBytes ? Math.min(99, Math.round((uploadedBytes / totalBytes) * 100)) : 0;
+      job.upload_progress = {
+        uploaded_bytes: uploadedBytes,
+        total_bytes: totalBytes,
+        percent,
+        status: "uploading",
+      };
+      if (now - lastProgressBroadcast > 1000 || percent >= 99) {
+        lastProgressBroadcast = now;
+        broadcastJob(job, "upload_progress", {
+          job_id: job.job_id,
+          upload_progress: job.upload_progress,
+        });
+      }
+    });
+    const autoStart = ["1", "true", "yes"].includes((parsedUpload.fields["auto_start"] ?? "true").toLowerCase());
+    const cameraRoles = parseCameraRoles(parsedUpload.fields["camera_roles"]);
+
+    await attachUploadedFilesToJob(job, parsedUpload.files, cameraRoles);
+    broadcastJob(job, "upload_complete", publicJob(job));
+
+    if (autoStart) {
+      void runUploadedJob(job);
+    }
+
+    res.status(201).json(publicJob(job));
+  } catch (err) {
+    job.status = "failed";
+    job.error = err instanceof Error ? err.message : "Upload failed";
+    job.upload_progress = {
+      ...job.upload_progress,
+      status: "failed",
+    };
+    logger.error(err, "Pipeline job upload failed");
+    broadcastJob(job, "upload_failed", publicJob(job));
+    res.status(400).json({
+      error: job.error,
     });
   }
 });
@@ -717,6 +867,10 @@ router.post("/jobs/:jobId/start", (req, res) => {
   }
   if (job.status === "complete") {
     res.status(409).json({ error: "Job is already complete" });
+    return;
+  }
+  if (job.cameras.length === 0) {
+    res.status(409).json({ error: "Upload videos before starting the job" });
     return;
   }
 

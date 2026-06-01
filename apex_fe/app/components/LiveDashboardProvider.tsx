@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { DIRECT_API_BASE_URL, type EventLog, type LiveMetrics, type PipelineJob } from "../lib/api";
+import { DIRECT_API_BASE_URL, type EventLog, type LiveMetrics, type PipelineJob, type UploadProgress } from "../lib/api";
 
 export type ChartPoint = {
   label: string;
@@ -16,6 +16,7 @@ type LiveDashboardSnapshot = {
   customerPoints: ChartPoint[];
   employeePoints: ChartPoint[];
   streamStatus: string;
+  uploadProgress: UploadProgress;
   latestCustomerDelta: number;
   latestStaffDelta: number;
 };
@@ -37,6 +38,13 @@ export const emptyMetrics: LiveMetrics = {
   total_events: 0,
 };
 
+const emptyUploadProgress: UploadProgress = {
+  uploaded_bytes: 0,
+  total_bytes: null,
+  percent: 0,
+  status: "waiting",
+};
+
 const initialSnapshot: LiveDashboardSnapshot = {
   activeJobId: "",
   job: null,
@@ -52,6 +60,7 @@ const initialSnapshot: LiveDashboardSnapshot = {
   customerPoints: [{ label: "0s", value: 0 }],
   employeePoints: [{ label: "0s", value: 0 }],
   streamStatus: "Idle",
+  uploadProgress: emptyUploadProgress,
   latestCustomerDelta: 0,
   latestStaffDelta: 0,
 };
@@ -101,6 +110,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
   const [customerPoints, setCustomerPoints] = useState<ChartPoint[]>(initialSnapshot.customerPoints);
   const [employeePoints, setEmployeePoints] = useState<ChartPoint[]>(initialSnapshot.employeePoints);
   const [streamStatus, setStreamStatus] = useState(initialSnapshot.streamStatus);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress>(initialSnapshot.uploadProgress);
   const [latestCustomerDelta, setLatestCustomerDelta] = useState(initialSnapshot.latestCustomerDelta);
   const [latestStaffDelta, setLatestStaffDelta] = useState(initialSnapshot.latestStaffDelta);
   const [restored, setRestored] = useState(false);
@@ -150,6 +160,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
     setLogs([
       nextLog("system", `Started a fresh dashboard session for ${jobId}.`),
     ]);
+    setUploadProgress(emptyUploadProgress);
     setCustomerPoints(initialSnapshot.customerPoints);
     setEmployeePoints(initialSnapshot.employeePoints);
     setLatestCustomerDelta(0);
@@ -185,6 +196,7 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
       setCustomerPoints(snapshot.customerPoints?.length ? snapshot.customerPoints.slice(-60) : initialSnapshot.customerPoints);
       setEmployeePoints(snapshot.employeePoints?.length ? snapshot.employeePoints.slice(-60) : initialSnapshot.employeePoints);
       setStreamStatus(snapshot.activeJobId ? "Connecting" : "Idle");
+      setUploadProgress(snapshot.uploadProgress ?? snapshot.job?.upload_progress ?? emptyUploadProgress);
       setLatestCustomerDelta(snapshot.latestCustomerDelta ?? 0);
       setLatestStaffDelta(snapshot.latestStaffDelta ?? 0);
     }
@@ -203,11 +215,12 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
       customerPoints,
       employeePoints,
       streamStatus,
+      uploadProgress,
       latestCustomerDelta,
       latestStaffDelta,
     };
     window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
-  }, [activeJobId, customerPoints, employeePoints, job, latestCustomerDelta, latestStaffDelta, logs, metrics, restored, streamStatus]);
+  }, [activeJobId, customerPoints, employeePoints, job, latestCustomerDelta, latestStaffDelta, logs, metrics, restored, streamStatus, uploadProgress]);
 
   useEffect(() => {
     if (!restored || !activeJobId) {
@@ -224,14 +237,54 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
       const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
       processingActiveRef.current = nextJob.status === "running";
       setJob(nextJob);
+      setUploadProgress(nextJob.upload_progress ?? emptyUploadProgress);
       applyMetricsWithoutDelta(nextJob.live_metrics);
       pushLog("snapshot", `Loaded job ${nextJob.job_id} with ${nextJob.cameras.length} cameras.`);
+    });
+
+    source.addEventListener("job_created", (event) => {
+      const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      setJob(nextJob);
+      setUploadProgress(nextJob.upload_progress ?? emptyUploadProgress);
+      setStreamStatus("Waiting for upload");
+      pushLog("job", `Job ${nextJob.job_id} created. Waiting for camera uploads.`);
+    });
+
+    source.addEventListener("upload_started", (event) => {
+      const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      setJob(nextJob);
+      setUploadProgress(nextJob.upload_progress ?? emptyUploadProgress);
+      setStreamStatus("Uploading");
+      pushLog("upload", "Video upload started.");
+    });
+
+    source.addEventListener("upload_progress", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as { upload_progress: UploadProgress };
+      setUploadProgress(payload.upload_progress);
+      setStreamStatus("Uploading");
+    });
+
+    source.addEventListener("upload_complete", (event) => {
+      const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      setJob(nextJob);
+      setUploadProgress(nextJob.upload_progress ?? { ...emptyUploadProgress, percent: 100, status: "complete" });
+      setStreamStatus("Upload complete");
+      pushLog("upload", `${nextJob.cameras.length} camera videos uploaded. Preparing processing.`);
+    });
+
+    source.addEventListener("upload_failed", (event) => {
+      const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
+      setJob(nextJob);
+      setUploadProgress(nextJob.upload_progress ?? { ...emptyUploadProgress, status: "failed" });
+      setStreamStatus("Upload failed");
+      pushLog("failed", nextJob.error ?? "Upload failed.");
     });
 
     source.addEventListener("job_started", (event) => {
       const nextJob = JSON.parse((event as MessageEvent).data) as PipelineJob;
       processingActiveRef.current = true;
       setJob(nextJob);
+      setUploadProgress(nextJob.upload_progress ?? { ...emptyUploadProgress, percent: 100, status: "complete" });
       pushLog("job", `Processing started for ${nextJob.cameras.length} cameras.`);
     });
 
@@ -347,15 +400,16 @@ export function LiveDashboardProvider({ children }: { children: ReactNode }) {
   const value = useMemo<LiveDashboardContextValue>(() => ({
     activeJobId,
     setActiveJobId,
-    job,
-    metrics,
-    logs,
-    customerPoints,
-    employeePoints,
-    streamStatus,
-    latestCustomerDelta,
-    latestStaffDelta,
-  }), [activeJobId, customerPoints, employeePoints, job, latestCustomerDelta, latestStaffDelta, logs, metrics, streamStatus]);
+      job,
+      metrics,
+      logs,
+      customerPoints,
+      employeePoints,
+      streamStatus,
+      uploadProgress,
+      latestCustomerDelta,
+      latestStaffDelta,
+  }), [activeJobId, customerPoints, employeePoints, job, latestCustomerDelta, latestStaffDelta, logs, metrics, streamStatus, uploadProgress]);
 
   return (
     <LiveDashboardContext.Provider value={value}>

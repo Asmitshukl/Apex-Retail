@@ -20,8 +20,8 @@ export type CameraRunSummary = {
   duration_ms: number;
 };
 
-export type JobStatus = "uploaded" | "running" | "complete" | "failed" | "cancelled";
-export type CameraJobStatus = "pending" | "running" | "complete" | "failed" | "cancelled";
+export type JobStatus = "created" | "uploading" | "uploaded" | "running" | "complete" | "failed" | "cancelled";
+export type CameraJobStatus = "pending" | "uploading" | "running" | "complete" | "failed" | "cancelled";
 
 export type UploadedCamera = {
   camera_id: string;
@@ -50,6 +50,13 @@ export type LiveMetrics = {
   total_events: number;
 };
 
+export type UploadProgress = {
+  uploaded_bytes: number;
+  total_bytes: number | null;
+  percent: number;
+  status: "waiting" | "uploading" | "complete" | "failed";
+};
+
 export type PipelineJob = {
   job_id: string;
   store_id: string;
@@ -63,6 +70,7 @@ export type PipelineJob = {
   upload_dir: string;
   output_dir: string;
   cameras: UploadedCamera[];
+  upload_progress: UploadProgress;
   live_metrics: LiveMetrics;
   customer_ids: Set<string>;
   staff_ids: Set<string>;

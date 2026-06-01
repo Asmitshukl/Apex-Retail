@@ -46,6 +46,13 @@ export type CameraJob = {
   completed_at: string | null;
 };
 
+export type UploadProgress = {
+  uploaded_bytes: number;
+  total_bytes: number | null;
+  percent: number;
+  status: "waiting" | "uploading" | "complete" | "failed";
+};
+
 export type PipelineJob = {
   job_id: string;
   store_id: string;
@@ -54,6 +61,7 @@ export type PipelineJob = {
   started_at: string | null;
   completed_at: string | null;
   cameras: CameraJob[];
+  upload_progress: UploadProgress;
   live_metrics: LiveMetrics;
   summary: {
     total_events: number;

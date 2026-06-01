@@ -35,6 +35,10 @@ async function startWorker(): Promise<Server> {
       "API worker started",
     );
   });
+  server.requestTimeout = 0;
+  server.timeout = 0;
+  server.headersTimeout = 600_000;
+  server.keepAliveTimeout = 120_000;
 
   const shutdown = async (signal: NodeJS.Signals) => {
     logger.info({ signal, pid: process.pid }, "API worker shutting down");

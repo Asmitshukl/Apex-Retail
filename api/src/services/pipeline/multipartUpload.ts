@@ -10,6 +10,11 @@ export type ParsedUpload = {
   files: Array<{ fieldName: string; filename: string; path: string; size: number }>;
 };
 
+export type UploadProgressEvent = {
+  uploadedBytes: number;
+  totalBytes: number | null;
+};
+
 function safeName(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]/g, "_").replace(/^_+/, "") || "file";
 }
@@ -28,19 +33,45 @@ async function writeToStream(stream: WriteStream, chunk: Buffer): Promise<void> 
     return;
   }
   await new Promise<void>((resolve, reject) => {
-    stream.once("drain", resolve);
-    stream.once("error", reject);
+    const cleanup = () => {
+      stream.off("drain", onDrain);
+      stream.off("error", onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    stream.once("drain", onDrain);
+    stream.once("error", onError);
   });
 }
 
 async function closeWriteStream(stream: WriteStream): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    stream.end(() => resolve());
-    stream.once("error", reject);
+    const cleanup = () => {
+      stream.off("error", onError);
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    stream.once("error", onError);
+    stream.end(() => {
+      cleanup();
+      resolve();
+    });
   });
 }
 
-export async function parseMultipartUpload(req: Request, uploadDir: string): Promise<ParsedUpload> {
+export async function parseMultipartUpload(
+  req: Request,
+  uploadDir: string,
+  onProgress?: (event: UploadProgressEvent) => void,
+): Promise<ParsedUpload> {
   const contentType = req.headers["content-type"] ?? "";
   const boundary = /boundary=([^;]+)/i.exec(contentType)?.[1];
   if (!boundary) {
@@ -48,6 +79,10 @@ export async function parseMultipartUpload(req: Request, uploadDir: string): Pro
   }
 
   await fs.mkdir(uploadDir, { recursive: true });
+  const totalBytesHeader = req.headers["content-length"];
+  const totalBytes = typeof totalBytesHeader === "string" ? Number(totalBytesHeader) : null;
+  const normalisedTotalBytes = totalBytes !== null && Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : null;
+  let uploadedBytes = 0;
   const boundaryBuffer = Buffer.from(`--${boundary}`);
   const contentBoundaryBuffer = Buffer.from(`\r\n--${boundary}`);
   const fields: Record<string, string> = {};
@@ -183,7 +218,10 @@ export async function parseMultipartUpload(req: Request, uploadDir: string): Pro
   }
 
   for await (const chunk of req) {
-    buffer = Buffer.concat([buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+    const nextChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    uploadedBytes += nextChunk.length;
+    onProgress?.({ uploadedBytes, totalBytes: normalisedTotalBytes });
+    buffer = Buffer.concat([buffer, nextChunk]);
     await processBuffer();
   }
   await processBuffer(true);

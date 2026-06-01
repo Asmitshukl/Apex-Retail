@@ -6,7 +6,7 @@ import { AppShell } from "./AppShell";
 import { emptyMetrics, useLiveDashboard } from "./LiveDashboardProvider";
 import { LineChart } from "./LineChart";
 import { MetricCard } from "./MetricCard";
-import { API_BASE_URL, formatNumber } from "../lib/api";
+import { API_BASE_URL, DIRECT_API_BASE_URL, formatNumber, type PipelineJob } from "../lib/api";
 
 type ZoneRow = {
   zone_id: string;
@@ -25,6 +25,7 @@ export function DashboardClient() {
     customerPoints,
     employeePoints,
     streamStatus,
+    uploadProgress,
     latestCustomerDelta,
     latestStaffDelta,
   } = useLiveDashboard();
@@ -58,6 +59,7 @@ export function DashboardClient() {
   const safeMetrics = metrics ?? emptyMetrics;
   const totalVisitors = metrics?.unique_visitors ?? 0;
   const currentVisitors = Math.max(0, safeMetrics.entry_count - safeMetrics.exit_count);
+  const uploadPercent = Math.round(uploadProgress.percent);
   const zoneRows = useMemo(
     () => zones.length > 0 ? zones.slice(0, 5) : [
       { zone_id: "Makeup", frequency: 0, avg_dwell_ms: 0, normalised_score: 0 },
@@ -66,6 +68,17 @@ export function DashboardClient() {
     ],
     [zones],
   );
+
+  async function startUploadedJob() {
+    if (!job) {
+      return;
+    }
+    const response = await fetch(`${DIRECT_API_BASE_URL}/pipeline/jobs/${job.job_id}/start`, { method: "POST" });
+    if (!response.ok) {
+      return;
+    }
+    await response.json() as PipelineJob;
+  }
 
   return (
     <AppShell>
@@ -103,6 +116,41 @@ export function DashboardClient() {
           <MetricCard label="Staff Detected" value={formatNumber(safeMetrics.staff_seen)} hint="LICM staff matches" icon="◆" />
           <MetricCard label="Billing Queue" value={formatNumber(safeMetrics.billing_queue)} hint="active queue estimate" icon="▣" />
         </section>
+
+        {activeJobId ? (
+          <section className="card p-5">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 className="text-base font-bold">Upload & Processing</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  {uploadProgress.status === "complete"
+                    ? "Upload complete. Processing analytics from camera clips."
+                    : uploadProgress.status === "uploading"
+                      ? "Uploading camera clips while the dashboard stream stays open."
+                      : "Waiting for camera clips."}
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="soft-badge px-3 py-2 text-sm font-semibold">{uploadProgress.status}</span>
+                {job?.status === "uploaded" ? (
+                  <button onClick={startUploadedJob} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white">
+                    Start Processing
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            <div className="mt-4 h-2 rounded-full bg-slate-100">
+              <div
+                className="h-2 rounded-full bg-emerald-500 transition-all duration-500"
+                style={{ width: `${Math.max(0, Math.min(100, uploadPercent))}%` }}
+              />
+            </div>
+            <div className="mt-2 flex justify-between text-xs text-slate-500">
+              <span>{formatNumber(uploadProgress.uploaded_bytes)} bytes uploaded</span>
+              <span>{uploadPercent}%</span>
+            </div>
+          </section>
+        ) : null}
 
         <section className="grid gap-6 xl:grid-cols-2">
           <LineChart

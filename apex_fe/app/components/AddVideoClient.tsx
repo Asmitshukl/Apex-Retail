@@ -57,11 +57,35 @@ export function AddVideoClient() {
       return;
     }
 
-    setStatus("Uploading videos to local job storage...");
+    setStatus("Creating processing job...");
+    let createResponse: Response;
+    try {
+      createResponse = await fetch(`${DIRECT_API_BASE_URL}/pipeline/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          store_id: storeId,
+          clip_start: clipStart,
+          sample_fps: sampleFps,
+        }),
+      });
+    } catch {
+      setStatus(`Job creation failed. The browser could not reach the API at ${DIRECT_API_BASE_URL}.`);
+      return;
+    }
+    if (!createResponse.ok) {
+      const errorText = await createResponse.text().catch(() => "");
+      setStatus(`Job creation failed with ${createResponse.status}${errorText ? `: ${errorText}` : ""}`);
+      return;
+    }
+
+    const nextJob = await createResponse.json() as PipelineJob;
+    setJob(nextJob);
+    setActiveJobId(nextJob.job_id);
+    setStatus("Job created. Redirecting to dashboard and uploading videos...");
+    router.push(`/dashboard?job=${encodeURIComponent(nextJob.job_id)}`);
+
     const form = new FormData();
-    form.append("store_id", storeId);
-    form.append("clip_start", clipStart);
-    form.append("sample_fps", String(sampleFps));
     form.append("auto_start", String(autoStart));
     form.append(
       "camera_roles",
@@ -71,27 +95,26 @@ export function AddVideoClient() {
       form.append(item.cameraId, item.file);
     }
 
-    let response: Response;
-    try {
-      response = await fetch(`${DIRECT_API_BASE_URL}/pipeline/jobs/upload`, {
-        method: "POST",
-        body: form,
-      });
-    } catch {
-      setStatus(`Upload failed. The browser could not reach the API at ${DIRECT_API_BASE_URL}. Make sure the API is running on port 3001 and restart the API/frontend if needed.`);
-      return;
-    }
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "");
-      setStatus(`Upload failed with ${response.status}${errorText ? `: ${errorText}` : ""}`);
-      return;
-    }
-
-    const nextJob = await response.json() as PipelineJob;
-    setJob(nextJob);
-    setActiveJobId(nextJob.job_id);
-    setStatus(autoStart ? "Job uploaded and processing started." : "Job uploaded. Start it when ready.");
-    router.push(`/dashboard?job=${encodeURIComponent(nextJob.job_id)}`);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${DIRECT_API_BASE_URL}/pipeline/jobs/${encodeURIComponent(nextJob.job_id)}/upload`);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        setStatus(`Uploading videos: ${Math.round((event.loaded / event.total) * 100)}%`);
+      } else {
+        setStatus("Uploading videos...");
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        setStatus(autoStart ? "Upload complete. Processing started." : "Upload complete. Start the job from the dashboard.");
+        return;
+      }
+      setStatus(`Upload failed with ${xhr.status}${xhr.responseText ? `: ${xhr.responseText}` : ""}`);
+    };
+    xhr.onerror = () => {
+      setStatus(`Upload failed. The browser could not reach the API at ${DIRECT_API_BASE_URL}.`);
+    };
+    xhr.send(form);
   }
 
   async function startJob() {

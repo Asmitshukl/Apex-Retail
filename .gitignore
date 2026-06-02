@@ -28,7 +28,6 @@ pipeline/weights/
 
 # Pipeline output (generated, not source)
 pipeline/output/
-pipeline/data/
 *.jsonl
 
 # ─── Node / Next.js (apex_fe/ + api/) ─────────────────
@@ -49,6 +48,25 @@ dist/
 # ─── Docker ───────────────────────────────────────────
 docker-compose.override.yml
 
+# ─── Pipeline input metadata + dataset ────────────────
+# Keep tiny source metadata in git so Docker works on a fresh clone.
+# Keep heavy CCTV footage, crops, and datasets out of git.
+pipeline/data/*
+!pipeline/data/
+!pipeline/data/.gitkeep
+!pipeline/data/store_layout.json
+!pipeline/data/pos_transactions.csv
+pipeline/data/clips/
+pipeline/data/crops/
+pipeline/data/**/*.mp4
+pipeline/data/**/*.avi
+pipeline/data/**/*.mov
+pipeline/data/**/*.mkv
+pipeline/data/**/*.jpg
+pipeline/data/**/*.jpeg
+pipeline/data/**/*.png
+pipeline/data/**/*.zip
+
 # ─── Dataset (never commit CCTV footage) ──────────────
 *.mp4
 *.avi
@@ -56,8 +74,6 @@ docker-compose.override.yml
 *.mkv
 dataset/
 clips/
-pos_transactions.csv
-store_layout.json
 
 # ─── OS & Editor ──────────────────────────────────────
 .DS_Store

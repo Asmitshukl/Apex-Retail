@@ -20,6 +20,7 @@ export function createApp() {
 
   app.use("/events", eventsRouter);
   app.use("/pipeline", pipelineRouter);
+  app.use("/metrics", metricsRouter);
   app.use("/stores", metricsRouter);
   app.use("/stores", funnelRouter);
   app.use("/stores", heatmapRouter);

@@ -118,10 +118,29 @@ asmitshukl/apex-retail-models:v1
 
 Start with:
 
+Linux/macOS/Git Bash:
+
 ```bash
 MODEL_IMAGE=asmitshukl/apex-retail-models:v1 \
 docker-compose -f docker-compose.yml -f docker-compose.models-pull.yml up --build
 ```
+
+Windows PowerShell:
+
+```powershell
+$env:MODEL_IMAGE = "asmitshukl/apex-retail-models:v1"
+docker-compose -f docker-compose.yml -f docker-compose.models-pull.yml up --build
+```
+
+Windows Command Prompt:
+
+```bat
+set MODEL_IMAGE=asmitshukl/apex-retail-models:v1
+docker-compose -f docker-compose.yml -f docker-compose.models-pull.yml up --build
+```
+
+If your machine uses the newer Docker Compose plugin, replace `docker-compose`
+with `docker compose` in the commands above.
 
 What this method does:
 

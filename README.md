@@ -22,6 +22,43 @@ Main services:
 - `pipeline/models/`: YOLO and LICM model files
 - `db`: PostgreSQL container for local Docker testing
 
+## Reviewer Quick Start
+
+Five-command setup for the default Git LFS model path:
+
+```bash
+git clone git@github.com:Asmitshukl/Apex-Retail.git
+cd Apex-Retail
+git lfs pull
+docker compose up --build
+curl http://localhost:3001/metrics
+```
+
+If `docker compose` is unavailable but `docker-compose` exists, use `docker-compose up --build` for command 4.
+
+Quick API checks:
+
+```bash
+curl http://localhost:3001/health
+curl http://localhost:3001/metrics
+curl http://localhost:3001/stores/STORE_BLR_002/funnel
+curl http://localhost:3001/pipeline/status
+```
+
+Run API tests:
+
+```bash
+cd api
+npm test
+```
+
+If Git LFS is not installed on the review machine, use the Docker Hub model-image path instead of `git lfs pull`:
+
+```bash
+MODEL_IMAGE=asmitshukl/apex-retail-models:v1 \
+docker compose -f docker-compose.yml -f docker-compose.models-pull.yml up --build
+```
+
 ## Model Files
 
 The pipeline needs these model files:

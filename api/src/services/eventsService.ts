@@ -3,6 +3,13 @@ import { z } from "zod";
 
 import prisma from "../db/client.js";
 
+type EventPersistenceClient = {
+  event: {
+    findUnique: typeof prisma.event.findUnique;
+    upsert: typeof prisma.event.upsert;
+  };
+};
+
 export const eventSchema = z.object({
   event_id: z.string().uuid(),
   store_id: z.string().min(1),
@@ -51,7 +58,7 @@ export type IngestResult = {
   storeIds: string[];
 };
 
-export async function ingestEvents(body: unknown): Promise<IngestResult> {
+export async function ingestEventsWithClient(body: unknown, client: EventPersistenceClient): Promise<IngestResult> {
   const eventsValue = body && typeof body === "object" && "events" in body ? (body as { events?: unknown }).events : undefined;
   const rawEvents = Array.isArray(eventsValue) ? eventsValue : [];
   const envelope = ingestSchema.safeParse(body);
@@ -91,7 +98,7 @@ export async function ingestEvents(body: unknown): Promise<IngestResult> {
 
   for (const event of validEvents) {
     storeIds.add(event.store_id);
-    const existing = await prisma.event.findUnique({
+    const existing = await client.event.findUnique({
       where: { eventId: event.event_id },
       select: { eventId: true },
     });
@@ -115,7 +122,7 @@ export async function ingestEvents(body: unknown): Promise<IngestResult> {
         metadata: event.metadata as Prisma.InputJsonValue,
     };
 
-    await prisma.event.upsert({
+    await client.event.upsert({
       where: { eventId: event.event_id },
       update: {},
       create: data,
@@ -131,4 +138,8 @@ export async function ingestEvents(body: unknown): Promise<IngestResult> {
     eventCount: rawEvents.length,
     storeIds: [...storeIds],
   };
+}
+
+export async function ingestEvents(body: unknown): Promise<IngestResult> {
+  return ingestEventsWithClient(body, prisma);
 }

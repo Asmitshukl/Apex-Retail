@@ -28,7 +28,7 @@ The core constraint is CPU-only inference shared across all camera feeds in a si
 The accuracy trade-off is acceptable because the scoring criteria reward correct event emission and schema compliance over raw detection mAP. A YOLOv8n detection at 0.83 confidence on real footage (observed in testing) is sufficient for ENTRY/EXIT counting and zone classification. Low-confidence detections are emitted rather than suppressed, per schema requirement.
 
 **Why not a VLM for zone classification or staff detection:**
-A VLM (GPT-4V, Claude Vision, Gemini) was considered for zone classification and staff detection. Both were rejected for the hot path: per-frame API latency (200ms–2s) would collapse throughput from 3 FPS to under 0.5 FPS, breaking the real-time requirement. Staff detection uses an HSV histogram heuristic instead — green/blue dominant pixels above 35% of the bounding box area are flagged as staff uniform. This runs in under 1ms per detection and is sufficient as a placeholder that can be replaced without changing the event schema.
+A VLM (GPT-4V, Claude Vision, Gemini) was considered for zone classification and staff detection. Both were rejected for the hot path: per-frame API latency (200ms–2s) would collapse throughput from 3 FPS to under 0.5 FPS, breaking the real-time requirement. Staff detection started as a lightweight HSV fallback, but real Brigade Road footage showed HSV was not reliable enough for black uniforms under changing lighting. The final pipeline uses LICM, a lightweight ONNX image classifier trained on store-specific staff/customer crops, with HSV kept only as a fallback if the classifier file is unavailable.
 
 ---
 
